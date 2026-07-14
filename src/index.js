@@ -25,13 +25,14 @@ import Http from 'node:http';
 import cluster from 'node:cluster';
 import os from 'node:os';
 import uid from '@cocreate/uuid';
-import SocketServer from '@cocreate/socket-server';
 import Config from '@cocreate/config';
+import authenticate from '@cocreate/authenticate';
+import authorize from '@cocreate/authorize';
+import SocketServer from '@cocreate/socket-server';
 import CrudServer from '@cocreate/crud-server';
 import LazyLoader from '@cocreate/lazy-loader';
 import FileServer from '@cocreate/file-server';
-import authenticate from '@cocreate/authenticate';
-import authorize from '@cocreate/authorize';
+import ApiServer from '@cocreate/api';
 
 const isPrimary = cluster.isPrimary !== undefined ? cluster.isPrimary : cluster.isMaster;
 const instanceId = process.env.INSTANCE_ID || uid.generate();
@@ -152,11 +153,6 @@ export class CoCreateServer {
             return this;
         }
 
-        this.crud = await CrudServer.init(this);
-        this.wsManager = new SocketServer(this);
-        this.files = FileServer.init(this);
-        this.loader = LazyLoader.init(this);
-
         const ingressImportPath = config?.ingress?.import || `@cocreate/${ingressProvider}`;
         const certImportPath = config?.certificate?.import || `@cocreate/${certProvider}`;
 
@@ -167,7 +163,8 @@ export class CoCreateServer {
                 this.https = (await import('node:https')).createServer({
                     SNICallback: (domain, cb) => loadedCertModule.sniCallback(domain, cb)
                 }, (req, res) => this.handleEdgeRequest(req, res));
-                this.certificate = loadedCertModule.init(this);
+                this.certificate = loadedCertModule
+                await this.certificate.init(this);
             }
         }
 
@@ -185,8 +182,15 @@ export class CoCreateServer {
                 });
 
                 this.ingress = new IngressClass(clusterProxy);
+                await this.ingress.init();
             }
         }
+
+        this.crud = await CrudServer.init(this);
+        this.wsManager = new SocketServer(this);
+        this.api = await ApiServer.init(this);
+        this.files = FileServer.init(this);
+        this.loader = await LazyLoader.init(this);
 
         const HTTP_PORT = 8080;
         const HTTPS_PORT = 8443;
