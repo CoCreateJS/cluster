@@ -1,3 +1,15 @@
+## [1.2.2](https://github.com/CoCreate-app/CoCreate-server/compare/v1.2.1...v1.2.2) (2026-07-14)
+
+
+### Bug Fixes
+
+* refactor server initialization to include API server and improve module loading ([97fe5bf](https://github.com/CoCreate-app/CoCreate-server/commit/97fe5bfa94b98020d042024e3969312684dd7a68))
+* removed post install ([7ecf61a](https://github.com/CoCreate-app/CoCreate-server/commit/7ecf61ae0e5dd37244ecdbfd9c1cf434ef36e676))
+* semantic version handling. Reorganize .gitignore for improved clarity and structure ([27f9506](https://github.com/CoCreate-app/CoCreate-server/commit/27f9506ddb71641dc93b32cef6224a194c8bd009))
+* Update GitHub Actions workflow to use latest versions of actions and Node.js ([043f46e](https://github.com/CoCreate-app/CoCreate-server/commit/043f46e0a3a16c8186ebc7189e00fdfbffd201f7))
+* update module export to ES6 syntax in release.config.js ([2643676](https://github.com/CoCreate-app/CoCreate-server/commit/2643676e58b1ceec917da4780e569b55d65d5abb))
+* update package.json and refactor index.js for module compatibility ([0e21383](https://github.com/CoCreate-app/CoCreate-server/commit/0e21383964b0280f020d9da82058133e7b4d7eed))
+
 ## [1.2.1](https://github.com/CoCreate-app/CoCreate-server/compare/v1.2.0...v1.2.1) (2025-05-01)
 
 
