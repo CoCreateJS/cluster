@@ -19,7 +19,6 @@
 import Http from 'node:http';
 import Https from 'node:https';
 import Acme from '@cocreate/acme';
-import Nginx from '@cocreate/nginx';
 import SocketMesh from '@cocreate/socket-mesh';
 import Metrics from '@cocreate/metrics';
 
@@ -70,8 +69,20 @@ export class CoCreateServer {
         this.infrastructure = null;
 
         this.certificate = null;
-        this.ingress = null;
-        this.http = Http.createServer((req, res) => this.handleEdgeRequest(req, res));
+        // this.ingress = null;
+        
+        this.http = Http.createServer((req, res) => {
+            const requestUrl = req.url || '/';
+            // 1. Allow ACME challenges to pass through over unencrypted HTTP
+            if (requestUrl.startsWith('/.well-known/acme-challenge/')) {
+                return this.handleEdgeRequest(req, res);
+            }
+            // 2. Force a 301 redirect to HTTPS for all other traffic (Replacing Nginx)
+            const host = req.headers.host ? req.headers.host.split(':')[0] : 'localhost';
+            res.writeHead(301, { "Location": `https://${host}${requestUrl}` });
+            res.end();
+        });
+        
         this.https = null;
         this.authenticate = authenticate;
         this.authorize = authorize;
@@ -182,10 +193,10 @@ export class CoCreateServer {
 
         // 1. Initialize HTTPS & Certificate via Acme
         this.certificate = Acme;
+        this.https = Https.createServer({
+            SNICallback: (domain, cb) => this.certificate.sniCallback(domain, cb)
+        }, (req, res) => this.handleEdgeRequest(req, res));
         await this.certificate.init(this);
-
-        // 2. Initialize Ingress (Nginx) using safe single synchronous instantiations
-        this.ingress = new Nginx(cluster);
 
         // Standard Core Services
         this.crud = await CrudServer.init(this);
@@ -205,18 +216,20 @@ export class CoCreateServer {
         // 4. Initialize Performance Metrics
         this.metrics = await Metrics.init(this);
 
-        const HTTP_PORT = 8080;
-        const HTTPS_PORT = 8443;
+        // Bind directly to standard web ports (Requires setcap or root privileges)
+        const HTTP_PORT = process.env.HTTP_PORT || 80;
+        const HTTPS_PORT = process.env.HTTPS_PORT || 443;
+        const BIND_IP = process.env.BIND_IP || '0.0.0.0'; // Accept traffic from any network interface
 
         if (this.http) {
-            this.http.listen(HTTP_PORT, () => {
-                console.log(`[@cocreate/server] ${processLabel} HTTP listening on PORT ${HTTP_PORT}`);
+            this.http.listen(HTTP_PORT, BIND_IP, () => {
+                console.log(`[@cocreate/server] ${processLabel} HTTP listening on ${BIND_IP}:${HTTP_PORT} (Redirects & ACME)`);
             });
         }
 
         if (this.https) {
-            this.https.listen(HTTPS_PORT, () => {
-                console.log(`[@cocreate/server] ${processLabel} HTTPS listening on PORT ${HTTPS_PORT}`);
+            this.https.listen(HTTPS_PORT, BIND_IP, () => {
+                console.log(`[@cocreate/server] ${processLabel} HTTPS listening on ${BIND_IP}:${HTTPS_PORT} (Secure Edge & WSS)`);
             });
         }
 
