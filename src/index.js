@@ -17,12 +17,19 @@
  * ********************************************************************************/
 
 import Http from 'node:http';
+import Https from 'node:https';
+import Acme from '@cocreate/acme';
+import Nginx from '@cocreate/nginx';
+import SocketMesh from '@cocreate/socket-mesh';
+import Metrics from '@cocreate/metrics';
+
 import cluster from 'node:cluster';
 import os from 'node:os';
 import uid from '@cocreate/uuid';
 import Config from '@cocreate/config';
 import authenticate from '@cocreate/authenticate';
 import authorize from '@cocreate/authorize';
+
 import SocketServer from '@cocreate/socket-server';
 import CrudServer from '@cocreate/crud-server';
 import LazyLoader from '@cocreate/lazy-loader';
@@ -36,43 +43,32 @@ import resolveInfrastructure from './getInfrastructure.js';
 import getIP from './getIp.js';
 
 const isPrimary = cluster.isPrimary !== undefined ? cluster.isPrimary : cluster.isMaster;
-
 const id = process.env.SERVER_ID || ObjectId().toString();
 
 const sharedMap = new Map();
 const pendingPromises = new Map();
 const activeWorkers = new Map();
 
-/**
- * Robust helper to retrieve configuration variables.
- * Resolves both flat dot-notation keys (e.g., obj["mesh.provider"]) 
- * and standard nested properties (e.g., obj.mesh.provider).
- */
-function getVal(obj, path) {
-    if (!obj) return undefined;
-    if (obj[path] !== undefined) return obj[path];
-    return path.split('.').reduce((acc, part) => acc && acc[part], obj);
-}
-
 export class CoCreateServer {
     constructor() {
         this.id = id;
         this.isPrimary = isPrimary;
+        
         if (isPrimary) {
             this.workers = activeWorkers;
+        } else {
+            this.workerId = parseInt(process.env.WORKER_ID, 10) || 1;
         }
-        this.workerId = isPrimary ? 0 : parseInt(process.env.WORKER_ID, 10) || 1;
+        
         this.totalWorkers = 1;
         this.workerStorage = null;
         this.isInitialized = false;
         
-        // Dynamic host parameters resolved on boot
         this.organization_id = null;
         this.host = null;
         this.ip = null;
         this.infrastructure = null;
 
-        // Core systems
         this.certificate = null;
         this.ingress = null;
         this.http = Http.createServer((req, res) => this.handleEdgeRequest(req, res));
@@ -82,10 +78,9 @@ export class CoCreateServer {
         this.wsManager = null;
         this.mesh = null;
         this.crud = null;
-        this.metrics = null
+        this.metrics = null;
         this.files = null;
         this.loader = null;
-
     }
 
     async init() {
@@ -107,11 +102,7 @@ export class CoCreateServer {
         const config = await Config({
             'organization_id': '',
             'host': '',
-            'workers': '',
-            'ingress': '',
-            'certificate': '',
-            'mesh': '',
-            'metrics': ''
+            'workers': ''
         });
 
         this.organization_id = config.organization_id || null;
@@ -126,12 +117,19 @@ export class CoCreateServer {
         }
 
         if (this.isPrimary && this.totalWorkers > 1) {
+            console.log(`[@cocreate/server] [PRIMARY] Orchestrator resolving environmental context...`);
+            
+            this.ip = await getIP();
+            this.infrastructure = await resolveInfrastructure(this.id);
+
             console.log(`[@cocreate/server] [PRIMARY] Orchestrator running with PID: ${process.pid}`);
             for (let i = 0; i < this.totalWorkers; i++) {
                 const currentWorkerId = i + 1;
                 const worker = cluster.fork({ 
                     WORKER_ID: currentWorkerId,
-                    SERVER_ID: this.id 
+                    SERVER_ID: this.id,
+                    SERVER_IP: this.ip,
+                    SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure)
                 });
                 activeWorkers.set(currentWorkerId, {
                     id: currentWorkerId,
@@ -151,9 +149,12 @@ export class CoCreateServer {
                     }
                 }
                 const targetId = deadWorkerId || (activeWorkers.size + 1);
+                
                 const newWorker = cluster.fork({ 
                     WORKER_ID: targetId,
-                    SERVER_ID: this.id 
+                    SERVER_ID: this.id, 
+                    SERVER_IP: this.ip,
+                    SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure)
                 });
                 activeWorkers.set(targetId, {
                     id: targetId,
@@ -165,84 +166,57 @@ export class CoCreateServer {
             return this;
         }
 
-        console.log(`[@cocreate/server] Worker ${process.pid} (ID: ${this.workerId}) resolving environment...`);
-        this.ip = await getIP();
-        this.infrastructure = await resolveInfrastructure(this.id);
-
-        const certProvider = getVal(config, 'certificate.provider') || 'acme';
-        const certImportPath = getVal(config, 'certificate.import') || `@cocreate/${certProvider}`;
-        if (certProvider !== 'none' && certProvider !== 'false') {
-            const loadedCertModule = await importModule(certImportPath);
-            if (loadedCertModule) {
-                this.https = (await import('node:https')).createServer({
-                    SNICallback: (domain, cb) => loadedCertModule.sniCallback(domain, cb)
-                }, (req, res) => this.handleEdgeRequest(req, res));
-                this.certificate = loadedCertModule;
-                await this.certificate.init(this);
-            }
+        const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
+        console.log(`[@cocreate/server] ${processLabel} adopting primary environmental context...`);
+        
+        this.ip = process.env.SERVER_IP || await getIP();
+        
+        try {
+            this.infrastructure = process.env.SERVER_INFRASTRUCTURE 
+                ? JSON.parse(process.env.SERVER_INFRASTRUCTURE) 
+                : await resolveInfrastructure(this.id);
+        } catch (error) {
+            console.error(`[@cocreate/server] Worker ${process.pid} failed to parse pre-resolved infrastructure. Falling back...`, error);
+            this.infrastructure = await resolveInfrastructure(this.id);
         }
 
-        const ingressProvider = getVal(config, 'ingress.provider') || 'nginx';
-        const ingressImportPath = getVal(config, 'ingress.import') || `@cocreate/${ingressProvider}`;
-        if (ingressProvider !== 'none' && ingressProvider !== 'false') {
-            const IngressClass = await importModule(ingressImportPath);
-            if (IngressClass) {
-                const clusterProxy = new Proxy(cluster, {
-                    get(target, prop) {
-                        if (prop === 'worker') return target.worker || { id: 1 };
-                        return Reflect.get(target, prop);
-                    }
-                });
-                this.ingress = new IngressClass(clusterProxy);
-                await this.ingress.init();
-            }
-        }
+        // 1. Initialize HTTPS & Certificate via Acme
+        this.certificate = Acme;
+        await this.certificate.init(this);
 
+        // 2. Initialize Ingress (Nginx) using safe single synchronous instantiations
+        this.ingress = new Nginx(cluster);
+
+        // Standard Core Services
         this.crud = await CrudServer.init(this);
         this.wsManager = new SocketServer(this);
         this.api = await ApiServer.init(this);
         this.files = FileServer.init(this);
         this.loader = await LazyLoader.init(this);
 
-        const meshProvider = getVal(config, 'mesh.provider') || 'socket-mesh';
-        const meshImportPath = getVal(config, 'mesh.import') || `@cocreate/${meshProvider}`;
-        if (meshProvider !== 'none' && meshProvider !== 'false') {
-            const MeshModule = await importModule(meshImportPath);
-            if (MeshModule) {
-                this.mesh = MeshModule;
-                if (typeof this.mesh.init === 'function') {
-                    await this.mesh.init(this);
-                } else {
-                    console.error(`[@cocreate/server] Error: Loaded mesh module from "${meshImportPath}" but it does not export an "init" function.`);
-                }
-            } else {
-                console.error(`[@cocreate/server] Error: Mesh module could not be imported from "${meshImportPath}". Check package dependencies or spelling.`);
-            }
+        // 3. Initialize Mesh Synchronization
+        this.mesh = SocketMesh;
+        if (typeof this.mesh.init === 'function') {
+            await this.mesh.init(this);
+        } else {
+            console.error(`[@cocreate/server] Error: Loaded mesh module does not export an "init" function.`);
         }
 
-        const metricsProvider = getVal(config, 'metrics.provider') || 'metrics';
-        const metricsImportPath = getVal(config, 'metrics.import') || `@cocreate/${metricsProvider}`;
-        if (metricsProvider !== 'none' && metricsProvider !== 'false') {
-            const MetricsModule = await importModule(metricsImportPath);
-            if (MetricsModule) {
-                this.metrics = await MetricsModule.init(this);
-            } else {
-                console.error(`[@cocreate/server] Error: Metrics module could not be imported from "${meshImportPath}". Check package dependencies or spelling.`);
-            }
-        }
+        // 4. Initialize Performance Metrics
+        this.metrics = await Metrics.init(this);
 
         const HTTP_PORT = 8080;
         const HTTPS_PORT = 8443;
 
         if (this.http) {
             this.http.listen(HTTP_PORT, () => {
-                console.log(`[@cocreate/server] Worker ${process.pid} (ID: ${this.workerId}) HTTP listening on PORT ${HTTP_PORT}`);
+                console.log(`[@cocreate/server] ${processLabel} HTTP listening on PORT ${HTTP_PORT}`);
             });
         }
 
         if (this.https) {
             this.https.listen(HTTPS_PORT, () => {
-                console.log(`[@cocreate/server] Worker ${process.pid} (ID: ${this.workerId}) HTTPS listening on PORT ${HTTPS_PORT}`);
+                console.log(`[@cocreate/server] ${processLabel} HTTPS listening on PORT ${HTTPS_PORT}`);
             });
         }
 
@@ -320,16 +294,6 @@ function setupIPC(serverCtx) {
                 }
             }
         });
-    }
-}
-
-async function importModule(importPath) {
-    try {
-        const modulePayload = await import(importPath);
-        return modulePayload && modulePayload.default !== undefined ? modulePayload.default : modulePayload;
-    } catch (err) {
-        console.error(`[@cocreate/server] Failed to load module at "${importPath}":`, err.message);
-        return null;
     }
 }
 
