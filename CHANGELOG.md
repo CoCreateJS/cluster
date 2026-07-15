@@ -1,3 +1,12 @@
+# [1.3.0](https://github.com/CoCreate-app/CoCreate-server/compare/v1.2.2...v1.3.0) (2026-07-15)
+
+
+### Features
+
+* add infrastructure and IP resolution modules for cloud provider metadata retrieval ([bb7b6cf](https://github.com/CoCreate-app/CoCreate-server/commit/bb7b6cf06a8dcbae0f68c8d3c644ffc40d553d97))
+* enhance server initialization with improved configuration handling and dynamic module imports ([9bd44c3](https://github.com/CoCreate-app/CoCreate-server/commit/9bd44c32ad3be2274b53a0fc859bb05346c34f91))
+* integrate Acme, Nginx, SocketMesh, and Metrics modules for enhanced server capabilities ([1d84a1c](https://github.com/CoCreate-app/CoCreate-server/commit/1d84a1c061d8421433fcb93d183e768d63eada10))
+
 ## [1.2.2](https://github.com/CoCreate-app/CoCreate-server/compare/v1.2.1...v1.2.2) (2026-07-14)
 
 
