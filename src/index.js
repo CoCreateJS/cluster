@@ -29,25 +29,42 @@ import LazyLoader from '@cocreate/lazy-loader';
 import FileServer from '@cocreate/file-server';
 import ApiServer from '@cocreate/api';
 
+import { ObjectId } from '@cocreate/utils';
+
 // Importing our dynamic environmental resolvers
 import resolveInfrastructure from './getInfrastructure.js';
 import getIP from './getIp.js';
 
 const isPrimary = cluster.isPrimary !== undefined ? cluster.isPrimary : cluster.isMaster;
-const id = process.env.INSTANCE_ID || uid.generate();
+
+const id = process.env.SERVER_ID || ObjectId().toString();
 
 const sharedMap = new Map();
 const pendingPromises = new Map();
 const activeWorkers = new Map();
 
+/**
+ * Robust helper to retrieve configuration variables.
+ * Resolves both flat dot-notation keys (e.g., obj["mesh.provider"]) 
+ * and standard nested properties (e.g., obj.mesh.provider).
+ */
+function getVal(obj, path) {
+    if (!obj) return undefined;
+    if (obj[path] !== undefined) return obj[path];
+    return path.split('.').reduce((acc, part) => acc && acc[part], obj);
+}
+
 export class CoCreateServer {
     constructor() {
+        this.id = id;
         this.isPrimary = isPrimary;
+        if (isPrimary) {
+            this.workers = activeWorkers;
+        }
         this.workerId = isPrimary ? 0 : parseInt(process.env.WORKER_ID, 10) || 1;
         this.totalWorkers = 1;
         this.workerStorage = null;
         this.isInitialized = false;
-        this.id = id;
         
         // Dynamic host parameters resolved on boot
         this.organization_id = null;
@@ -57,20 +74,18 @@ export class CoCreateServer {
 
         // Core systems
         this.certificate = null;
+        this.ingress = null;
         this.http = Http.createServer((req, res) => this.handleEdgeRequest(req, res));
         this.https = null;
-        this.wsManager = null;
-        this.ingress = null;
-        this.crud = null;
-        this.files = null;
-        this.loader = null;
-        this.mesh = null; // Holds the dynamically loaded cluster mesh driver
         this.authenticate = authenticate;
         this.authorize = authorize;
+        this.wsManager = null;
+        this.mesh = null;
+        this.crud = null;
+        this.metrics = null
+        this.files = null;
+        this.loader = null;
 
-        if (isPrimary) {
-            this.workers = activeWorkers;
-        }
     }
 
     async init() {
@@ -90,26 +105,21 @@ export class CoCreateServer {
         };
 
         const config = await Config({
-            'workers': {
-                prompt: 'Enter number of worker processes (or "false" for standalone): '
-            },
-            'ingress.provider': {
-                prompt: 'Enter your ingress provider (e.g., nginx, haproxy, or none): '
-            },
-            'certificate.provider': {
-                prompt: 'Enter your certificate provider (e.g., acme, self-signed, or none): '
-            },
-            'mesh.provider': {
-                prompt: 'Enter server clustering mesh provider (e.g., socket-mesh, or none): '
-            }
+            'organization_id': '',
+            'host': '',
+            'workers': '',
+            'ingress': '',
+            'certificate': '',
+            'mesh': '',
+            'metrics': ''
         });
 
-        this.organization_id = config?.organization_id || null;
-        this.host = config?.host || null;
+        this.organization_id = config.organization_id || null;
+        this.host = config.host || null;
 
-        let configuredWorkers = config?.workers;
+        let configuredWorkers = config.workers;
 
-        if (!configuredWorkers || configuredWorkers === 'false') {
+        if (configuredWorkers === false || configuredWorkers === 'false') {
             this.totalWorkers = 1;
         } else {
             this.totalWorkers = parseInt(configuredWorkers, 10) || os.cpus().length;
@@ -121,7 +131,7 @@ export class CoCreateServer {
                 const currentWorkerId = i + 1;
                 const worker = cluster.fork({ 
                     WORKER_ID: currentWorkerId,
-                    INSTANCE_ID: this.id 
+                    SERVER_ID: this.id 
                 });
                 activeWorkers.set(currentWorkerId, {
                     id: currentWorkerId,
@@ -143,7 +153,7 @@ export class CoCreateServer {
                 const targetId = deadWorkerId || (activeWorkers.size + 1);
                 const newWorker = cluster.fork({ 
                     WORKER_ID: targetId,
-                    INSTANCE_ID: this.id 
+                    SERVER_ID: this.id 
                 });
                 activeWorkers.set(targetId, {
                     id: targetId,
@@ -159,8 +169,8 @@ export class CoCreateServer {
         this.ip = await getIP();
         this.infrastructure = await resolveInfrastructure(this.id);
 
-        const certProvider = config?.certificate?.provider || 'acme';
-        const certImportPath = config?.certificate?.import || `@cocreate/${certProvider}`;
+        const certProvider = getVal(config, 'certificate.provider') || 'acme';
+        const certImportPath = getVal(config, 'certificate.import') || `@cocreate/${certProvider}`;
         if (certProvider !== 'none' && certProvider !== 'false') {
             const loadedCertModule = await importModule(certImportPath);
             if (loadedCertModule) {
@@ -172,8 +182,8 @@ export class CoCreateServer {
             }
         }
 
-        const ingressProvider = config?.ingress?.provider || 'nginx';
-        const ingressImportPath = config?.ingress?.import || `@cocreate/${ingressProvider}`;
+        const ingressProvider = getVal(config, 'ingress.provider') || 'nginx';
+        const ingressImportPath = getVal(config, 'ingress.import') || `@cocreate/${ingressProvider}`;
         if (ingressProvider !== 'none' && ingressProvider !== 'false') {
             const IngressClass = await importModule(ingressImportPath);
             if (IngressClass) {
@@ -194,17 +204,30 @@ export class CoCreateServer {
         this.files = FileServer.init(this);
         this.loader = await LazyLoader.init(this);
 
-        const meshProvider = config?.mesh?.provider || 'socket-mesh';
-        const meshImportPath = config?.mesh?.import || `@cocreate/${meshProvider}`;
+        const meshProvider = getVal(config, 'mesh.provider') || 'socket-mesh';
+        const meshImportPath = getVal(config, 'mesh.import') || `@cocreate/${meshProvider}`;
         if (meshProvider !== 'none' && meshProvider !== 'false') {
-            console.log(`[@cocreate/server] Dynamic cluster mesh requested: "${meshProvider}"`);
             const MeshModule = await importModule(meshImportPath);
             if (MeshModule) {
                 this.mesh = MeshModule;
-                // Initialize the pluggable mesh with our runtime context
                 if (typeof this.mesh.init === 'function') {
                     await this.mesh.init(this);
+                } else {
+                    console.error(`[@cocreate/server] Error: Loaded mesh module from "${meshImportPath}" but it does not export an "init" function.`);
                 }
+            } else {
+                console.error(`[@cocreate/server] Error: Mesh module could not be imported from "${meshImportPath}". Check package dependencies or spelling.`);
+            }
+        }
+
+        const metricsProvider = getVal(config, 'metrics.provider') || 'metrics';
+        const metricsImportPath = getVal(config, 'metrics.import') || `@cocreate/${metricsProvider}`;
+        if (metricsProvider !== 'none' && metricsProvider !== 'false') {
+            const MetricsModule = await importModule(metricsImportPath);
+            if (MetricsModule) {
+                this.metrics = await MetricsModule.init(this);
+            } else {
+                console.error(`[@cocreate/server] Error: Metrics module could not be imported from "${meshImportPath}". Check package dependencies or spelling.`);
             }
         }
 
