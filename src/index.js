@@ -14,8 +14,9 @@
  * You should have received a copy of the GNU Affero General Public License
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  *
- * ********************************************************************************/
+ ********************************************************************************/
 
+import { EventEmitter } from 'node:events';
 import Http from 'node:http';
 import Https from 'node:https';
 import Acme from '@cocreate/acme';
@@ -37,7 +38,7 @@ import ApiServer from '@cocreate/api';
 
 import { ObjectId } from '@cocreate/utils';
 
-// Importing our dynamic environmental resolvers
+// Dynamic environmental resolvers
 import resolveInfrastructure from './getInfrastructure.js';
 import getIP from './getIp.js';
 
@@ -48,8 +49,9 @@ const sharedMap = new Map();
 const pendingPromises = new Map();
 const activeWorkers = new Map();
 
-export class CoCreateServer {
+export class CoCreateServer extends EventEmitter {
     constructor() {
+        super();
         this.id = id;
         this.isPrimary = isPrimary;
         
@@ -59,7 +61,7 @@ export class CoCreateServer {
             this.workerId = parseInt(process.env.WORKER_ID, 10) || 1;
         }
         
-        this.totalWorkers = 1;
+        this.totalWorkers = 0;
         this.workerStorage = null;
         this.isInitialized = false;
         
@@ -68,16 +70,14 @@ export class CoCreateServer {
         this.ip = null;
         this.infrastructure = null;
 
-        this.certificate = null;
-        // this.ingress = null;
-        
+        // Create HTTP server for edge proxy ACME challenges and secure HTTPS redirects
         this.http = Http.createServer((req, res) => {
             const requestUrl = req.url || '/';
             // 1. Allow ACME challenges to pass through over unencrypted HTTP
             if (requestUrl.startsWith('/.well-known/acme-challenge/')) {
                 return this.handleEdgeRequest(req, res);
             }
-            // 2. Force a 301 redirect to HTTPS for all other traffic (Replacing Nginx)
+            // 2. Force a 301 redirect to HTTPS for all other traffic
             const host = req.headers.host ? req.headers.host.split(':')[0] : 'localhost';
             res.writeHead(301, { "Location": `https://${host}${requestUrl}` });
             res.end();
@@ -92,6 +92,52 @@ export class CoCreateServer {
         this.metrics = null;
         this.files = null;
         this.loader = null;
+    }
+
+    send(payload) {
+        if (!payload || !payload.method) {
+            console.error("[@cocreate/server] Cannot route IPC send without a 'method' definition.");
+            return;
+        }
+
+        if (this.isPrimary) {
+            // --- MASTER SEND ROUTING PATHWAY ---
+            // 1. Dispatch locally on Master process unless explicitly bypassed
+            if (payload.master !== false) {
+                this.emit(payload.method, payload);
+            }
+
+            // 2. Compile target worker list dynamically using a flat ternary condition.
+            // This eliminates duplicate loops, nested blocks, and repeated try/catch statements.
+            const targetIds = payload.broadcast === true
+                ? Array.from(this.workers.keys())
+                : (Array.isArray(payload.workers) ? payload.workers : []);
+
+            // 3. Dispatch to all compiled destination targets in a single unified loop.
+            for (const wId of targetIds) {
+                const worker = this.workers.get(wId);
+                if (worker?.process && typeof worker.process.send === 'function') {
+                    try {
+                        worker.process.send({ ipcPayload: true, payload });
+                    } catch (err) {
+                        console.error(`[@cocreate/server] Failed sending to worker ${wId}:`, err);
+                    }
+                }
+            }
+        } else {
+            // --- WORKER SEND ROUTING PATHWAY ---
+            // 1. Emit locally on this worker so native listeners trigger immediately
+            this.emit(payload.method, payload);
+
+            // 2. Relay the message upstream to the Primary Orchestrator Process
+            if (typeof process.send === 'function') {
+                try {
+                    process.send({ ipcPayload: true, payload });
+                } catch (err) {
+                    console.error("[@cocreate/server] Failed sending upstream IPC payload to Master:", err);
+                }
+            }
+        }
     }
 
     async init() {
@@ -121,60 +167,73 @@ export class CoCreateServer {
 
         let configuredWorkers = config.workers;
 
-        if (configuredWorkers === false || configuredWorkers === 'false') {
-            this.totalWorkers = 1;
-        } else {
+        if (configuredWorkers !== false && configuredWorkers !== 'false') {
             this.totalWorkers = parseInt(configuredWorkers, 10) || os.cpus().length;
         }
 
-        if (this.isPrimary && this.totalWorkers > 1) {
+        // DB interface is booted first so that SocketMesh can cleanly read nodes and write startup heartbeats
+        this.crud = await CrudServer.init(this);
+
+        // Assign the SocketMesh globally. This guarantees both Workers and Primary can safely call "this.mesh.broadcastToPeers"
+        this.mesh = SocketMesh;
+
+        if (this.isPrimary) {
             console.log(`[@cocreate/server] [PRIMARY] Orchestrator resolving environmental context...`);
             
             this.ip = await getIP();
             this.infrastructure = await resolveInfrastructure(this.id);
 
-            console.log(`[@cocreate/server] [PRIMARY] Orchestrator running with PID: ${process.pid}`);
-            for (let i = 0; i < this.totalWorkers; i++) {
-                const currentWorkerId = i + 1;
-                const worker = cluster.fork({ 
-                    WORKER_ID: currentWorkerId,
-                    SERVER_ID: this.id,
-                    SERVER_IP: this.ip,
-                    SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure)
-                });
-                activeWorkers.set(currentWorkerId, {
-                    id: currentWorkerId,
-                    pid: worker.process.pid,
-                    process: worker
-                });
-            }
-
-            cluster.on('exit', (worker, code, signal) => {
-                console.log(`[@cocreate/server] [PRIMARY] Worker ${worker.process.pid} exited (Code: ${code}, Signal: ${signal})`);
-                let deadWorkerId = null;
-                for (let [id, w] of activeWorkers.entries()) {
-                    if (w.pid === worker.process.pid) {
-                        deadWorkerId = id;
-                        activeWorkers.delete(id);
-                        break;
-                    }
+            if (this.totalWorkers > 1) {
+                console.log(`[@cocreate/server] [PRIMARY] Orchestrator running with PID: ${process.pid}`);
+                for (let i = 0; i < this.totalWorkers; i++) {
+                    const currentWorkerId = i + 1;
+                    const worker = cluster.fork({ 
+                        WORKER_ID: currentWorkerId,
+                        SERVER_ID: this.id,
+                        SERVER_IP: this.ip,
+                        SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure)
+                    });
+                    activeWorkers.set(currentWorkerId, {
+                        id: currentWorkerId,
+                        pid: worker.process.pid,
+                        process: worker
+                    });
                 }
-                const targetId = deadWorkerId || (activeWorkers.size + 1);
-                
-                const newWorker = cluster.fork({ 
-                    WORKER_ID: targetId,
-                    SERVER_ID: this.id, 
-                    SERVER_IP: this.ip,
-                    SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure)
-                });
-                activeWorkers.set(targetId, {
-                    id: targetId,
-                    pid: newWorker.process.pid,
-                    process: newWorker
-                });
-            });
 
-            return this;
+                // Supervise and automatically reboot dead or crashed worker processes
+                cluster.on('exit', (worker, code, signal) => {
+                    console.log(`[@cocreate/server] [PRIMARY] Worker ${worker.process.pid} exited (Code: ${code}, Signal: ${signal})`);
+                    let deadWorkerId = null;
+                    for (let [id, w] of activeWorkers.entries()) {
+                        if (w.pid === worker.process.pid) {
+                            deadWorkerId = id;
+                            activeWorkers.delete(id);
+                            break;
+                        }
+                    }
+                    const targetId = deadWorkerId || (activeWorkers.size + 1);
+                    
+                    const newWorker = cluster.fork({ 
+                        WORKER_ID: targetId,
+                        SERVER_ID: this.id, 
+                        SERVER_IP: this.ip,
+                        SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure)
+                    });
+                    activeWorkers.set(targetId, {
+                        id: targetId,
+                        pid: newWorker.process.pid,
+                        process: newWorker
+                    });
+                });
+
+                // In clustered mode, only the Primary boots the network tunnels
+                await this.mesh.init(this);
+
+                // In clustered mode, only the Primary exits early. The workers handle the core traffic.
+                if (this.totalWorkers > 1) {
+                    return this;
+                }
+            }
         }
 
         const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
@@ -191,35 +250,26 @@ export class CoCreateServer {
             this.infrastructure = await resolveInfrastructure(this.id);
         }
 
-        // 1. Initialize HTTPS & Certificate via Acme
+        // Initialize HTTPS & Ephemeral certificate via ACME
         this.certificate = Acme;
         this.https = Https.createServer({
             SNICallback: (domain, cb) => this.certificate.sniCallback(domain, cb)
         }, (req, res) => this.handleEdgeRequest(req, res));
         await this.certificate.init(this);
 
-        // Standard Core Services
-        this.crud = await CrudServer.init(this);
+        // Standard core services
         this.wsManager = new SocketServer(this);
         this.api = await ApiServer.init(this);
         this.files = FileServer.init(this);
         this.loader = await LazyLoader.init(this);
 
-        // 3. Initialize Mesh Synchronization
-        this.mesh = SocketMesh;
-        if (typeof this.mesh.init === 'function') {
-            await this.mesh.init(this);
-        } else {
-            console.error(`[@cocreate/server] Error: Loaded mesh module does not export an "init" function.`);
-        }
-
-        // 4. Initialize Performance Metrics
+        // Initialize performance metrics
         this.metrics = await Metrics.init(this);
 
         // Bind directly to standard web ports (Requires setcap or root privileges)
         const HTTP_PORT = process.env.HTTP_PORT || 80;
         const HTTPS_PORT = process.env.HTTPS_PORT || 443;
-        const BIND_IP = process.env.BIND_IP || '0.0.0.0'; // Accept traffic from any network interface
+        const BIND_IP = process.env.BIND_IP || '0.0.0.0';
 
         if (this.http) {
             this.http.listen(HTTP_PORT, BIND_IP, () => {
@@ -283,6 +333,7 @@ function workerStorageManager(serverCtx, method, key, value) {
 function setupIPC(serverCtx) {
     if (serverCtx.isPrimary) {
         cluster.on('message', (worker, message) => {
+            // 1. Check for standard storage operations
             if (message && message.id === serverCtx.id) {
                 try {
                     message.value = executeLocalWorkerStorageOperation(message.method, message.key, message.value);
@@ -292,9 +343,29 @@ function setupIPC(serverCtx) {
                     worker.send(message);
                 }
             }
+            // 2. Routing logic for CoCreate Unified IPC Payloads
+            else if (message && message.ipcPayload && message.payload) {
+                const { payload } = message;
+                
+                // Track sending worker PID to worker mapping
+                let senderWorkerId = null;
+                for (const [wId, w] of serverCtx.workers.entries()) {
+                    if (w.pid === worker.process.pid) {
+                        senderWorkerId = wId;
+                        break;
+                    }
+                }
+                
+                // Expose sender metadata to routing logic
+                payload.senderWorkerId = senderWorkerId;
+                
+                // Pass it off to the primary orchestrator's central send method
+                serverCtx.send(payload);
+            }
         });
     } else {
         process.on('message', (message) => {
+            // 1. Check for standard storage operations
             if (message && message.id === serverCtx.id) {
                 const pending = pendingPromises.get(message.messageId);
                 if (pending) {
@@ -305,6 +376,10 @@ function setupIPC(serverCtx) {
                         pending.resolve(message.value);
                     }
                 }
+            }
+            // 2. Incoming Unified IPC payload from Master -> Worker Process
+            else if (message && message.ipcPayload && message.payload) {
+                serverCtx.emit(message.payload.method, message.payload);
             }
         });
     }
