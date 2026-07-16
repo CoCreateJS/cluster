@@ -168,7 +168,13 @@ export class CoCreateServer extends EventEmitter {
         let configuredWorkers = config.workers;
 
         if (configuredWorkers !== false && configuredWorkers !== 'false') {
-            this.totalWorkers = parseInt(configuredWorkers, 10) || os.cpus().length;
+            const parsedWorkers = parseInt(configuredWorkers, 10);
+            if (parsedWorkers === -1) {
+                // Use total CPU cores minus 1 (minimum of 1) to reserve one core for the master process
+                this.totalWorkers = Math.max(1, os.cpus().length - 1);
+            } else {
+                this.totalWorkers = parsedWorkers || os.cpus().length;
+            }
         }
 
         // Explicitly set workerId = 1 on the single Primary process if workers configuration specifies no clustering (<= 1)
