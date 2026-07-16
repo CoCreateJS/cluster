@@ -171,10 +171,15 @@ export class CoCreateServer extends EventEmitter {
             this.totalWorkers = parseInt(configuredWorkers, 10) || os.cpus().length;
         }
 
+        // Explicitly set workerId = 1 on the single Primary process if workers configuration specifies no clustering (<= 1)
+        if (this.isPrimary && this.totalWorkers <= 1) {
+            this.workerId = 1;
+        }
+
         // DB interface is booted first so that SocketMesh can cleanly read nodes and write startup heartbeats
         this.crud = await CrudServer.init(this);
 
-        // Assign the SocketMesh globally. This guarantees both Workers and Primary can safely call "this.mesh.broadcastToPeers"
+        // Assign the SocketMesh globally. This guarantees both Workers and Primary can safely call "this.mesh.send"
         this.mesh = SocketMesh;
 
         if (this.isPrimary) {
@@ -182,6 +187,7 @@ export class CoCreateServer extends EventEmitter {
             
             this.ip = await getIP();
             this.infrastructure = await resolveInfrastructure(this.id);
+            await this.mesh.init(this);
 
             if (this.totalWorkers > 1) {
                 console.log(`[@cocreate/server] [PRIMARY] Orchestrator running with PID: ${process.pid}`);
@@ -225,9 +231,6 @@ export class CoCreateServer extends EventEmitter {
                         process: newWorker
                     });
                 });
-
-                // In clustered mode, only the Primary boots the network tunnels
-                await this.mesh.init(this);
 
                 // In clustered mode, only the Primary exits early. The workers handle the core traffic.
                 if (this.totalWorkers > 1) {
