@@ -1,6 +1,6 @@
 {
   "name": "@cocreate/server",
-  "version": "1.2.1",
+  "version": "1.4.0",
   "description": "A dynamic SSL certificate management and generation tool for proxies like NGINX, with a fallback to Node.js SSL termination. It seamlessly integrates HTTP, HTTPS, and ACME protocols to ensure secure, encrypted connections.",
   "keywords": [
     "ssl-certificate-management",
@@ -20,7 +20,8 @@
   "scripts": {
     "start": "npx webpack --config webpack.config.js",
     "build": "npx webpack --mode=production --config webpack.config.js",
-    "dev": "npx webpack --config webpack.config.js --watch"  },
+    "dev": "npx webpack --config webpack.config.js --watch"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/CoCreate-app/CoCreate-server.git"
@@ -35,7 +36,7 @@
     "type": "GitHub Sponsors ❤",
     "url": "https://github.com/sponsors/CoCreate-app"
   },
-  "type":"module",
+  "type": "module",
   "main": "./src/index.js",
   "dependencies": {
     "@cocreate/acme": "^1.3.0"

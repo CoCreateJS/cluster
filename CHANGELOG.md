@@ -1,3 +1,11 @@
+# [1.4.0](https://github.com/CoCreate-app/CoCreate-server/compare/v1.3.0...v1.4.0) (2026-07-16)
+
+
+### Features
+
+* enhance CoCreateServer with IPC routing and edge request handling ([4da9381](https://github.com/CoCreate-app/CoCreate-server/commit/4da9381214806b022c129a2d1a25a1a7ad0a6276))
+* update automated workflow and release configuration for improved semantic release handling ([8d442c2](https://github.com/CoCreate-app/CoCreate-server/commit/8d442c243f05a9daa8cdcd3241f26f4dfb18022b))
+
 # [1.3.0](https://github.com/CoCreate-app/CoCreate-server/compare/v1.2.2...v1.3.0) (2026-07-15)
 
 
