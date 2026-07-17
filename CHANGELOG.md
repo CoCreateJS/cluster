@@ -1,3 +1,13 @@
+# [1.5.0](https://github.com/CoCreate-app/CoCreate-server/compare/v1.4.0...v1.5.0) (2026-07-17)
+
+
+### Features
+
+* enhance worker configuration to reserve CPU core for master process ([0a05a51](https://github.com/CoCreate-app/CoCreate-server/commit/0a05a516b4917cafd508a81443855fb5956348bc))
+* replace Metrics with ServerTelemetry for enhanced performance monitoring ([c1de789](https://github.com/CoCreate-app/CoCreate-server/commit/c1de789aa938bc1fa07b95e40728c4fe348ace6b))
+* replace SocketMesh with ServerMesh and add ServerAutoscaler for improved orchestration ([02ac503](https://github.com/CoCreate-app/CoCreate-server/commit/02ac503f709a6d8d4dd680f5d660fc7025cecb1d))
+* set workerId for single Primary process and ensure SocketMesh initialization ([d80084a](https://github.com/CoCreate-app/CoCreate-server/commit/d80084af3e2b72ffa30157be9091d0110302d882))
+
 # [1.4.0](https://github.com/CoCreate-app/CoCreate-server/compare/v1.3.0...v1.4.0) (2026-07-16)
 
 
