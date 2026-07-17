@@ -71,6 +71,47 @@ export class CoCreateServer extends EventEmitter {
         this.ip = null;
         this.infrastructure = null;
 
+        // Ingress state management flags
+        this.isCordon = false;
+        this.isShedding = false;
+        this.isDraining = false;
+
+        this.on('cordon', (payload) => {
+            const active = payload?.active !== false;
+            
+            // Core Logic: Telemetry or callers cannot uncordon the node if shedding or draining is active
+            if (!active && (this.isShedding || this.isDraining)) {
+                console.warn(`[@cocreate/server] Blocked un-cordon request. Overriding active states: isShedding=${this.isShedding}, isDraining=${this.isDraining}`);
+                return;
+            }
+            
+            this.isCordon = active;
+            const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
+            console.log(`[@cocreate/server] ${processLabel} isCordon updated to: ${this.isCordon}`);
+        });
+
+        this.on('shed', (payload) => {
+            this.isShedding = payload?.active !== false;
+            
+            // Shedding state activation automatically triggers a network cordon
+            if (this.isShedding) {
+                this.isCordon = true;
+            }
+            const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
+            console.log(`[@cocreate/server] ${processLabel} isShedding updated to: ${this.isShedding} (isCordon: ${this.isCordon})`);
+        });
+
+        this.on('drain', (payload) => {
+            this.isDraining = payload?.active !== false;
+            
+            // Draining state activation automatically triggers a network cordon
+            if (this.isDraining) {
+                this.isCordon = true;
+            }
+            const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
+            console.log(`[@cocreate/server] ${processLabel} isDraining updated to: ${this.isDraining} (isCordon: ${this.isCordon})`);
+        });
+
         // Create HTTP server for edge proxy ACME challenges and secure HTTPS redirects
         this.http = Http.createServer((req, res) => {
             const requestUrl = req.url || '/';
@@ -78,8 +119,16 @@ export class CoCreateServer extends EventEmitter {
             if (requestUrl.startsWith('/.well-known/acme-challenge/')) {
                 return this.handleEdgeRequest(req, res);
             }
-            // 2. Force a 301 redirect to HTTPS for all other traffic
+            
             const host = req.headers.host ? req.headers.host.split(':')[0] : 'localhost';
+
+            // 2. Intercept with a 307 Temporary Redirect if cordon is active
+            if (this.isCordon) {
+                res.writeHead(307, { "Location": `https://${host}${requestUrl}` });
+                return res.end();
+            }
+
+            // 3. Force a 301 redirect to HTTPS for all other traffic
             res.writeHead(301, { "Location": `https://${host}${requestUrl}` });
             res.end();
         });
@@ -110,7 +159,6 @@ export class CoCreateServer extends EventEmitter {
             }
 
             // 2. Compile target worker list dynamically using a flat ternary condition.
-            // This eliminates duplicate loops, nested blocks, and repeated try/catch statements.
             const targetIds = payload.broadcast === true
                 ? Array.from(this.workers.keys())
                 : (Array.isArray(payload.workers) ? payload.workers : []);
@@ -172,22 +220,17 @@ export class CoCreateServer extends EventEmitter {
         if (configuredWorkers !== false && configuredWorkers !== 'false') {
             const parsedWorkers = parseInt(configuredWorkers, 10);
             if (parsedWorkers === -1) {
-                // Use total CPU cores minus 1 (minimum of 1) to reserve one core for the master process
                 this.totalWorkers = Math.max(1, os.cpus().length - 1);
             } else {
                 this.totalWorkers = parsedWorkers || os.cpus().length;
             }
         }
 
-        // Explicitly set workerId = 1 on the single Primary process if workers configuration specifies no clustering (<= 1)
         if (this.isPrimary && this.totalWorkers <= 1) {
             this.workerId = 1;
         }
 
-        // DB interface is booted first so that ServerMesh can cleanly read nodes and write startup heartbeats
         this.crud = await CrudServer.init(this);
-
-        // Assign the ServerMesh globally. This guarantees both Workers and Primary can safely call "this.mesh.send"
         this.mesh = ServerMesh;
         this.autoscaler = ServerAutoscaler;
 
@@ -242,7 +285,6 @@ export class CoCreateServer extends EventEmitter {
                     });
                 });
 
-                // In clustered mode, only the Primary exits early. The workers handle the core traffic.
                 if (this.totalWorkers > 1) {
                     return this;
                 }
@@ -260,23 +302,19 @@ export class CoCreateServer extends EventEmitter {
             this.infrastructure = await resolveInfrastructure(this.id);
         }
 
-        // Initialize HTTPS & Ephemeral certificate via ACME
         this.certificate = Acme;
         this.https = Https.createServer({
             SNICallback: (domain, cb) => this.certificate.sniCallback(domain, cb)
         }, (req, res) => this.handleEdgeRequest(req, res));
         await this.certificate.init(this);
 
-        // Standard core services
         this.wsManager = new SocketServer(this);
         this.api = await ApiServer.init(this);
         this.files = FileServer.init(this);
         this.loader = await LazyLoader.init(this);
 
-        // Initialize performance telemetry
         this.telemetry = await ServerTelemetry.init(this);
 
-        // Bind directly to standard web ports (Requires setcap or root privileges)
         const HTTP_PORT = process.env.HTTP_PORT || 80;
         const HTTPS_PORT = process.env.HTTPS_PORT || 443;
         const BIND_IP = process.env.BIND_IP || '0.0.0.0';
@@ -300,6 +338,14 @@ export class CoCreateServer extends EventEmitter {
     async handleEdgeRequest(req, res) {
         try {
             const requestUrl = req.url || '/';
+
+            // Check if cordon is active (exclude critical ACME challenges from loop-breaking)
+            if (this.isCordon && !requestUrl.startsWith('/.well-known/acme-challenge/')) {
+                const host = req.headers.host ? req.headers.host.split(':')[0] : 'localhost';
+                res.writeHead(307, { "Location": `https://${host}${requestUrl}` });
+                return res.end();
+            }
+
             if (requestUrl.startsWith("/webhooks/")) {
                 if (this.loader) return this.loader.request(req, res);
             }
@@ -344,7 +390,6 @@ function workerStorageManager(serverCtx, method, key, value) {
 function setupIPC(serverCtx) {
     if (serverCtx.isPrimary) {
         cluster.on('message', (worker, message) => {
-            // 1. Check for standard storage operations
             if (message && message.id === serverCtx.id) {
                 try {
                     message.value = executeLocalWorkerStorageOperation(message.method, message.key, message.value);
@@ -354,11 +399,9 @@ function setupIPC(serverCtx) {
                     worker.send(message);
                 }
             }
-            // 2. Routing logic for CoCreate Unified IPC Payloads
             else if (message && message.ipcPayload && message.payload) {
                 const { payload } = message;
                 
-                // Track sending worker PID to worker mapping
                 let senderWorkerId = null;
                 for (const [wId, w] of serverCtx.workers.entries()) {
                     if (w.pid === worker.process.pid) {
@@ -367,16 +410,12 @@ function setupIPC(serverCtx) {
                     }
                 }
                 
-                // Expose sender metadata to routing logic
                 payload.senderWorkerId = senderWorkerId;
-                
-                // Pass it off to the primary orchestrator's central send method
                 serverCtx.send(payload);
             }
         });
     } else {
         process.on('message', (message) => {
-            // 1. Check for standard storage operations
             if (message && message.id === serverCtx.id) {
                 const pending = pendingPromises.get(message.messageId);
                 if (pending) {
@@ -388,7 +427,6 @@ function setupIPC(serverCtx) {
                     }
                 }
             }
-            // 2. Incoming Unified IPC payload from Master -> Worker Process
             else if (message && message.ipcPayload && message.payload) {
                 serverCtx.emit(message.payload.method, message.payload);
             }
