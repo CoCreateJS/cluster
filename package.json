@@ -1,6 +1,6 @@
 {
   "name": "@cocreate/server",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "A dynamic SSL certificate management and generation tool for proxies like NGINX, with a fallback to Node.js SSL termination. It seamlessly integrates HTTP, HTTPS, and ACME protocols to ensure secure, encrypted connections.",
   "keywords": [
     "ssl-certificate-management",
