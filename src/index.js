@@ -22,7 +22,7 @@ import Https from 'node:https';
 import Acme from '@cocreate/acme';
 import ServerMesh from '@cocreate/server-mesh';
 import ServerAutoscaler from '@cocreate/server-autoscaler';
-import Metrics from '@cocreate/metrics';
+import ServerTelemetry from '@cocreate/server-telemetry';
 
 import cluster from 'node:cluster';
 import os from 'node:os';
@@ -91,7 +91,7 @@ export class CoCreateServer extends EventEmitter {
         this.authorize = authorize;
         this.wsManager = null;
         this.crud = null;
-        this.metrics = null;
+        this.telemetry = null;
         this.files = null;
         this.loader = null;
     }
@@ -273,8 +273,8 @@ export class CoCreateServer extends EventEmitter {
         this.files = FileServer.init(this);
         this.loader = await LazyLoader.init(this);
 
-        // Initialize performance metrics
-        this.metrics = await Metrics.init(this);
+        // Initialize performance telemetry
+        this.telemetry = await ServerTelemetry.init(this);
 
         // Bind directly to standard web ports (Requires setcap or root privileges)
         const HTTP_PORT = process.env.HTTP_PORT || 80;
