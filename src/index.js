@@ -20,7 +20,8 @@ import { EventEmitter } from 'node:events';
 import Http from 'node:http';
 import Https from 'node:https';
 import Acme from '@cocreate/acme';
-import SocketMesh from '@cocreate/socket-mesh';
+import ServerMesh from '@cocreate/server-mesh';
+import ServerAutoscaler from '@cocreate/server-autoscaler';
 import Metrics from '@cocreate/metrics';
 
 import cluster from 'node:cluster';
@@ -84,10 +85,11 @@ export class CoCreateServer extends EventEmitter {
         });
         
         this.https = null;
+        this.mesh = null;
+        this.autoscaler = null;
         this.authenticate = authenticate;
         this.authorize = authorize;
         this.wsManager = null;
-        this.mesh = null;
         this.crud = null;
         this.metrics = null;
         this.files = null;
@@ -182,18 +184,20 @@ export class CoCreateServer extends EventEmitter {
             this.workerId = 1;
         }
 
-        // DB interface is booted first so that SocketMesh can cleanly read nodes and write startup heartbeats
+        // DB interface is booted first so that ServerMesh can cleanly read nodes and write startup heartbeats
         this.crud = await CrudServer.init(this);
 
-        // Assign the SocketMesh globally. This guarantees both Workers and Primary can safely call "this.mesh.send"
-        this.mesh = SocketMesh;
+        // Assign the ServerMesh globally. This guarantees both Workers and Primary can safely call "this.mesh.send"
+        this.mesh = ServerMesh;
+        this.autoscaler = ServerAutoscaler;
 
         if (this.isPrimary) {
-            console.log(`[@cocreate/server] [PRIMARY] Orchestrator resolving environmental context...`);
+            console.log(`[@cocreate/server] [PRIMARY] Orchestrator starting...`);
             
             this.ip = await getIP();
             this.infrastructure = await resolveInfrastructure(this.id);
             await this.mesh.init(this);
+            await this.autoscaler.init(this);
 
             if (this.totalWorkers > 1) {
                 console.log(`[@cocreate/server] [PRIMARY] Orchestrator running with PID: ${process.pid}`);
@@ -244,9 +248,6 @@ export class CoCreateServer extends EventEmitter {
                 }
             }
         }
-
-        const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
-        console.log(`[@cocreate/server] ${processLabel} adopting primary environmental context...`);
         
         this.ip = process.env.SERVER_IP || await getIP();
         
@@ -279,6 +280,7 @@ export class CoCreateServer extends EventEmitter {
         const HTTP_PORT = process.env.HTTP_PORT || 80;
         const HTTPS_PORT = process.env.HTTPS_PORT || 443;
         const BIND_IP = process.env.BIND_IP || '0.0.0.0';
+        const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
 
         if (this.http) {
             this.http.listen(HTTP_PORT, BIND_IP, () => {
