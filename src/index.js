@@ -50,6 +50,11 @@ const sharedMap = new Map();
 const pendingPromises = new Map();
 const activeWorkers = new Map();
 
+// Track overall system state during shutdowns to prevent concurrent signal re-evaluation
+let isPrimaryShuttingDown = false;
+let isMeshClosed = false; // Dual-lock flag to guarantee DB prunes finish before process exits
+let primaryShutdownTimeout = null;
+
 export class CoCreateServer extends EventEmitter {
     constructor() {
         super();
@@ -96,6 +101,13 @@ export class CoCreateServer extends EventEmitter {
             // Shedding state activation automatically triggers a network cordon
             if (this.isShedding) {
                 this.isCordon = true;
+                
+                // Selective Shedding Integration: Target specified organizations inside the socket server
+                if (payload?.organizations && this.wsManager && typeof this.wsManager.destroyOrganizations === 'function') {
+                    const orgList = Array.isArray(payload.organizations) ? payload.organizations : [payload.organizations];
+                    console.log(`[@cocreate/server] Shedding event triggered. Selective eviction of org IDs:`, orgList);
+                    this.wsManager.destroyOrganizations(orgList);
+                }
             }
             const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
             console.log(`[@cocreate/server] ${processLabel} isShedding updated to: ${this.isShedding} (isCordon: ${this.isCordon})`);
@@ -107,12 +119,17 @@ export class CoCreateServer extends EventEmitter {
             // Draining state activation automatically triggers a network cordon
             if (this.isDraining) {
                 this.isCordon = true;
+                
+                // Complete Worker Drain Integration: Instantly purge all sockets and loaded maps
+                if (this.wsManager && typeof this.wsManager.destroyAll === 'function') {
+                    console.log(`[@cocreate/server] Worker-level drain event triggered. Purging all tenant configurations.`);
+                    this.wsManager.destroyAll();
+                }
             }
             const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
             console.log(`[@cocreate/server] ${processLabel} isDraining updated to: ${this.isDraining} (isCordon: ${this.isCordon})`);
         });
 
-        // Create HTTP server for edge proxy ACME challenges and secure HTTPS redirects
         this.http = Http.createServer((req, res) => {
             const requestUrl = req.url || '/';
             // 1. Allow ACME challenges to pass through over unencrypted HTTP
@@ -166,7 +183,7 @@ export class CoCreateServer extends EventEmitter {
             // 3. Dispatch to all compiled destination targets in a single unified loop.
             for (const wId of targetIds) {
                 const worker = this.workers.get(wId);
-                if (worker?.process && typeof worker.process.send === 'function') {
+                if (worker?.process && typeof worker.process.send === 'function' && worker.process.isConnected()) {
                     try {
                         worker.process.send({ ipcPayload: true, payload });
                     } catch (err) {
@@ -242,6 +259,9 @@ export class CoCreateServer extends EventEmitter {
             await this.mesh.init(this);
             await this.autoscaler.init(this);
 
+            // Setup Primary process Graceful Signal Listeners
+            setupPrimaryShutdownHooks(this);
+
             if (this.totalWorkers > 1) {
                 console.log(`[@cocreate/server] [PRIMARY] Orchestrator running with PID: ${process.pid}`);
                 for (let i = 0; i < this.totalWorkers; i++) {
@@ -252,6 +272,12 @@ export class CoCreateServer extends EventEmitter {
                         SERVER_IP: this.ip,
                         SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure)
                     });
+
+                    // Protect against unhandled 'error' events on the cluster worker wrapper
+                    worker.on('error', (err) => {
+                        console.error(`[@cocreate/server] [PRIMARY] Error on Worker ${currentWorkerId}:`, err.message);
+                    });
+
                     activeWorkers.set(currentWorkerId, {
                         id: currentWorkerId,
                         pid: worker.process.pid,
@@ -262,6 +288,7 @@ export class CoCreateServer extends EventEmitter {
                 // Supervise and automatically reboot dead or crashed worker processes
                 cluster.on('exit', (worker, code, signal) => {
                     console.log(`[@cocreate/server] [PRIMARY] Worker ${worker.process.pid} exited (Code: ${code}, Signal: ${signal})`);
+                    
                     let deadWorkerId = null;
                     for (let [id, w] of activeWorkers.entries()) {
                         if (w.pid === worker.process.pid) {
@@ -270,6 +297,22 @@ export class CoCreateServer extends EventEmitter {
                             break;
                         }
                     }
+
+                    // SAFETY: If Primary is shutting down or draining, DO NOT fork a replacement worker process!
+                    if (isPrimaryShuttingDown || this.isDraining) {
+                        console.log(`[@cocreate/server] [PRIMARY] Worker ${worker.process.pid} removed. Draining active workers: ${activeWorkers.size} remaining.`);
+                        
+                        // Dual-Lock Guard: Only exit Master if workers are dead AND mesh has completed the MongoDB prune
+                        if (activeWorkers.size === 0 && isMeshClosed) {
+                            console.log("[@cocreate/server] [PRIMARY] All workers successfully drained and Mesh closed. Terminating master process cleanly.");
+                            if (primaryShutdownTimeout) {
+                                clearTimeout(primaryShutdownTimeout);
+                            }
+                            process.exit(0);
+                        }
+                        return;
+                    }
+
                     const targetId = deadWorkerId || (activeWorkers.size + 1);
                     
                     const newWorker = cluster.fork({ 
@@ -278,6 +321,11 @@ export class CoCreateServer extends EventEmitter {
                         SERVER_IP: this.ip,
                         SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure)
                     });
+
+                    newWorker.on('error', (err) => {
+                        console.error(`[@cocreate/server] [PRIMARY] Error on replacement Worker ${targetId}:`, err.message);
+                    });
+
                     activeWorkers.set(targetId, {
                         id: targetId,
                         pid: newWorker.process.pid,
@@ -387,6 +435,79 @@ function workerStorageManager(serverCtx, method, key, value) {
     });
 }
 
+function setupPrimaryShutdownHooks(serverCtx) {
+    const handleSignal = async (signal) => {
+        if (isPrimaryShuttingDown) return;
+        isPrimaryShuttingDown = true;
+        serverCtx.isCordon = true;
+        serverCtx.isDraining = true;
+
+        console.log(`\n[@cocreate/server] [PRIMARY] Intercepted process termination signal: ${signal}. Commencing cluster-wide graceful shutdown...`);
+
+        // STEP 1: Close Mesh FIRST. Wipes the server record profile from the database while CRUD connection pools are completely active.
+        if (serverCtx.mesh && typeof serverCtx.mesh.close === 'function') {
+            try {
+                console.log("[@cocreate/server] [PRIMARY] Step 1: Initiating Server Mesh close & server record database removal...");
+                await serverCtx.mesh.close();
+                console.log("[@cocreate/server] [PRIMARY] Success: Server Mesh closed and server record cleanly wiped from database.");
+            } catch (err) {
+                console.error("[@cocreate/server] [PRIMARY] Failed to close Server Mesh or wipe server profile cleanly:", err);
+            }
+        }
+        isMeshClosed = true;
+
+        // Dual-Lock Resolution: If all workers finished exiting while the database prune was running,
+        // terminate the Master process cleanly right now instead of waiting for the safety timeout.
+        if (activeWorkers.size === 0) {
+            console.log("[@cocreate/server] [PRIMARY] All workers successfully drained and Mesh closed. Terminating master process cleanly.");
+            if (primaryShutdownTimeout) {
+                clearTimeout(primaryShutdownTimeout);
+            }
+            process.exit(0);
+        }
+
+        // STEP 2: Now that the database profile is clean, tell all worker processes over IPC to begin local graceful drains.
+        console.log("[@cocreate/server] [PRIMARY] Step 2: Informing worker processes to start local connection drains...");
+        for (const [wId, worker] of activeWorkers.entries()) {
+            const workerInstance = worker.process;
+            if (workerInstance && typeof workerInstance.send === 'function' && workerInstance.isConnected()) {
+                console.log(`[@cocreate/server] [PRIMARY] Sending 'shutdown' instruction to Worker ${wId} (PID: ${worker.pid})`);
+                try {
+                    workerInstance.send({ type: 'shutdown' });
+                } catch (err) {
+                    console.error(`[@cocreate/server] Failed sending shutdown IPC instruction to worker ${wId}:`, err);
+                }
+            } else {
+                console.log(`[@cocreate/server] [PRIMARY] Skipping disconnected Worker ${wId} (PID: ${worker.pid})`);
+            }
+        }
+
+        // STEP 3: Set Cooperative Grace Fallback Timer (5 Seconds)
+        // If workers finish early, the exit event triggers process exit immediately. If they hang, we force-kill.
+        primaryShutdownTimeout = setTimeout(() => {
+            console.warn("[@cocreate/server] [PRIMARY] Safety grace window expired! Force-terminating remaining processes...");
+            
+            for (const [wId, worker] of activeWorkers.entries()) {
+                if (worker?.process) {
+                    try {
+                        console.log(`[@cocreate/server] [PRIMARY] Force-killing hanging Worker ${wId} (PID: ${worker.pid}).`);
+                        worker.process.kill('SIGKILL');
+                    } catch (err) {
+                        console.error(`[@cocreate/server] Error force-killing Worker ${wId}:`, err);
+                    }
+                }
+            }
+            
+            console.log("[@cocreate/server] [PRIMARY] All worker processes forcefully reaped. Terminating Master process.");
+            process.exit(0);
+        }, 5000);
+    };
+
+    process.on('SIGTERM', () => handleSignal('SIGTERM'));
+    process.on('SIGINT', () => handleSignal('SIGINT'));
+    process.on('SIGBREAK', () => handleSignal('SIGBREAK'));
+}
+
 function setupIPC(serverCtx) {
     if (serverCtx.isPrimary) {
         cluster.on('message', (worker, message) => {
@@ -416,7 +537,19 @@ function setupIPC(serverCtx) {
         });
     } else {
         process.on('message', (message) => {
-            if (message && message.id === serverCtx.id) {
+            // Intercept Master-directed shutdown instruction over the worker's IPC channel
+            if (message && message.type === 'shutdown') {
+                console.log(`[@cocreate/server] [Worker ${process.pid}] Received master coordinated shutdown signal. Commencing local drain...`);
+                
+                // Immediately cordon worker traffic and trigger the internal SocketServer destroyAll logic
+                serverCtx.isCordon = true;
+                serverCtx.isDraining = true;
+                
+                if (serverCtx.wsManager && typeof serverCtx.wsManager.destroyAll === 'function') {
+                    serverCtx.wsManager.destroyAll();
+                }
+            }
+            else if (message && message.id === serverCtx.id) {
                 const pending = pendingPromises.get(message.messageId);
                 if (pending) {
                     pendingPromises.delete(message.messageId);
