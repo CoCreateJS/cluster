@@ -1,3 +1,11 @@
+# [1.6.0](https://github.com/CoCreate-app/CoCreate-server/compare/v1.5.1...v1.6.0) (2026-07-18)
+
+
+### Features
+
+* add ingress state management with cordon, shedding, and draining events ([b52a198](https://github.com/CoCreate-app/CoCreate-server/commit/b52a1986c566fe9a73c8e694542be69d808ae3eb))
+* implement graceful shutdown process with selective shedding and draining for improved resource management ([5c367e0](https://github.com/CoCreate-app/CoCreate-server/commit/5c367e0284f587965bd5b4248b1f1f97a4b51b2f))
+
 ## [1.5.1](https://github.com/CoCreate-app/CoCreate-server/compare/v1.5.0...v1.5.1) (2026-07-17)
 
 
