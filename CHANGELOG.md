@@ -1,3 +1,10 @@
+## [1.6.1](https://github.com/CoCreate-app/CoCreate-server/compare/v1.6.0...v1.6.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* set default branch to main ([37bf6bb](https://github.com/CoCreate-app/CoCreate-server/commit/37bf6bb580d5d73126b513060df3496da5ab4600))
+
 # [1.6.0](https://github.com/CoCreate-app/CoCreate-server/compare/v1.5.1...v1.6.0) (2026-07-18)
 
 
