@@ -223,7 +223,7 @@ export class CoCreateServer extends EventEmitter {
             clear: () => workerStorageManager(this, 'clear')
         };
 
-        const config = await Config({
+        const config = await Config.request({
             'organization_id': '',
             'host': '',
             'workers': ''
