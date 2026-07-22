@@ -26,7 +26,6 @@ import ServerTelemetry from '@cocreate/server-telemetry';
 
 import cluster from 'node:cluster';
 import os from 'node:os';
-import uid from '@cocreate/uuid';
 import Config from '@cocreate/config';
 import authenticate from '@cocreate/authenticate';
 import authorize from '@cocreate/authorize';
@@ -37,7 +36,7 @@ import LazyLoader from '@cocreate/lazy-loader';
 import FileServer from '@cocreate/file-server';
 import ApiServer from '@cocreate/api';
 
-import { ObjectId } from '@cocreate/utils';
+import { ObjectId, uuid } from '@cocreate/utils';
 
 // Dynamic environmental resolvers
 import resolveInfrastructure from './getInfrastructure.js';
@@ -252,8 +251,7 @@ export class CoCreateServer extends EventEmitter {
         this.autoscaler = ServerAutoscaler;
 
         if (this.isPrimary) {
-            console.log(`[@cocreate/server] [PRIMARY] Orchestrator starting...`);
-            
+            console.log(`[@cocreate/server] [PRIMARY] Orchestrator running with PID: ${process.pid}`);            
             this.ip = await getIP();
             this.infrastructure = await resolveInfrastructure(this.id);
             await this.mesh.init(this);
@@ -261,9 +259,10 @@ export class CoCreateServer extends EventEmitter {
 
             // Setup Primary process Graceful Signal Listeners
             setupPrimaryShutdownHooks(this);
+            
+            console.log(`[@cocreate/server] [PRIMARY] Orchestrator creating ${this.totalWorkers} workers.`);
 
             if (this.totalWorkers > 1) {
-                console.log(`[@cocreate/server] [PRIMARY] Orchestrator running with PID: ${process.pid}`);
                 for (let i = 0; i < this.totalWorkers; i++) {
                     const currentWorkerId = i + 1;
                     const worker = cluster.fork({ 
@@ -337,8 +336,11 @@ export class CoCreateServer extends EventEmitter {
                     return this;
                 }
             }
+        } else {
+            console.log(`[@cocreate/server] [WORKER ${this.workerId}] running with PID: ${process.pid}`);
         }
-        
+                this.telemetry = await ServerTelemetry.init(this);
+
         this.ip = process.env.SERVER_IP || await getIP();
         
         try {
@@ -361,22 +363,19 @@ export class CoCreateServer extends EventEmitter {
         this.files = FileServer.init(this);
         this.loader = await LazyLoader.init(this);
 
-        this.telemetry = await ServerTelemetry.init(this);
-
         const HTTP_PORT = process.env.HTTP_PORT || 80;
         const HTTPS_PORT = process.env.HTTPS_PORT || 443;
         const BIND_IP = process.env.BIND_IP || '0.0.0.0';
-        const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
 
         if (this.http) {
             this.http.listen(HTTP_PORT, BIND_IP, () => {
-                console.log(`[@cocreate/server] ${processLabel} HTTP listening on ${BIND_IP}:${HTTP_PORT} (Redirects & ACME)`);
+                console.log(`[@cocreate/server] [WORKER ${this.workerId}] HTTP listening on ${BIND_IP}:${HTTP_PORT} (Redirects & ACME)`);
             });
         }
 
         if (this.https) {
             this.https.listen(HTTPS_PORT, BIND_IP, () => {
-                console.log(`[@cocreate/server] ${processLabel} HTTPS listening on ${BIND_IP}:${HTTPS_PORT} (Secure Edge & WSS)`);
+                console.log(`[@cocreate/server] [WORKER ${this.workerId}] HTTPS listening on ${BIND_IP}:${HTTPS_PORT} (Secure Edge & WSS)`);
             });
         }
 
@@ -425,7 +424,7 @@ function workerStorageManager(serverCtx, method, key, value) {
             if (serverCtx.isPrimary) {
                 resolve(executeLocalWorkerStorageOperation(method, key, value));
             } else {
-                const messageId = uid.generate();
+                const messageId =  uuid();
                 pendingPromises.set(messageId, { resolve, reject });
                 process.send({ id: serverCtx.id, messageId, method, key, value });
             }
@@ -442,16 +441,15 @@ function setupPrimaryShutdownHooks(serverCtx) {
         serverCtx.isCordon = true;
         serverCtx.isDraining = true;
 
-        console.log(`\n[@cocreate/server] [PRIMARY] Intercepted process termination signal: ${signal}. Commencing cluster-wide graceful shutdown...`);
+        console.log(`\n[@cocreate/server] [PRIMARY] Process termination: ${signal}. Commencing graceful shutdown...`);
 
         // STEP 1: Close Mesh FIRST. Wipes the server record profile from the database while CRUD connection pools are completely active.
         if (serverCtx.mesh && typeof serverCtx.mesh.close === 'function') {
             try {
-                console.log("[@cocreate/server] [PRIMARY] Step 1: Initiating Server Mesh close & server record database removal...");
                 await serverCtx.mesh.close();
-                console.log("[@cocreate/server] [PRIMARY] Success: Server Mesh closed and server record cleanly wiped from database.");
+                console.log("[@cocreate/server] [PRIMARY] Success: Server Mesh closed and server removed from database.");
             } catch (err) {
-                console.error("[@cocreate/server] [PRIMARY] Failed to close Server Mesh or wipe server profile cleanly:", err);
+                console.error("[@cocreate/server] [PRIMARY] Failed to close Server Mesh or remove server from database:", err);
             }
         }
         isMeshClosed = true;
@@ -459,7 +457,7 @@ function setupPrimaryShutdownHooks(serverCtx) {
         // Dual-Lock Resolution: If all workers finished exiting while the database prune was running,
         // terminate the Master process cleanly right now instead of waiting for the safety timeout.
         if (activeWorkers.size === 0) {
-            console.log("[@cocreate/server] [PRIMARY] All workers successfully drained and Mesh closed. Terminating master process cleanly.");
+            console.log("[@cocreate/server] [PRIMARY] All workers successfully drained. Terminating master process cleanly.");
             if (primaryShutdownTimeout) {
                 clearTimeout(primaryShutdownTimeout);
             }
@@ -539,7 +537,7 @@ function setupIPC(serverCtx) {
         process.on('message', (message) => {
             // Intercept Master-directed shutdown instruction over the worker's IPC channel
             if (message && message.type === 'shutdown') {
-                console.log(`[@cocreate/server] [Worker ${process.pid}] Received master coordinated shutdown signal. Commencing local drain...`);
+                console.log(`[@cocreate/server] [WORKER ${process.pid}] Received master coordinated shutdown signal. Commencing local drain...`);
                 
                 // Immediately cordon worker traffic and trigger the internal SocketServer destroyAll logic
                 serverCtx.isCordon = true;
