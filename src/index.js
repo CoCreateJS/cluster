@@ -21,6 +21,7 @@ import Http from 'node:http';
 import Https from 'node:https';
 import cluster from 'node:cluster';
 import os from 'node:os';
+import { exec } from 'node:child_process';
 
 import Acme from '@cocreate/acme';
 import ServerMesh from '@cocreate/server-mesh';
@@ -43,9 +44,7 @@ import resolveInfrastructure from './getInfrastructure.js';
 import getIP from './getIp.js';
 
 const isPrimary = cluster.isPrimary !== undefined ? cluster.isPrimary : cluster.isMaster;
-const id = process.env.SERVER_ID || ObjectId().toString();
 
-const sharedMap = new Map();
 const pendingPromises = new Map();
 const activeWorkers = new Map();
 
@@ -53,11 +52,111 @@ const activeWorkers = new Map();
 let isPrimaryShuttingDown = false;
 let isMeshClosed = false; // Dual-lock flag to guarantee DB prunes finish before process exits
 let primaryShutdownTimeout = null;
+let shutdownCompletionCallback = null;
+
+class ClusterStateManager extends EventEmitter {
+    constructor(serverCtx) {
+        super();
+        this.serverCtx = serverCtx;
+        this.store = new Map();
+        
+        // Listen for top-down state broadcasts from Master
+        if (!this.serverCtx.isPrimary) {
+            this.serverCtx.on('cluster_state_sync', (payload) => {
+                if (payload && payload.key !== undefined) {
+                    if (payload.value === undefined) {
+                        this.store.delete(payload.key);
+                        this.emit(`delete:${payload.key}`);
+                        this.emit('delete', { key: payload.key });
+                    } else {
+                        this.store.set(payload.key, payload.value);
+                        this.emit(`change:${payload.key}`, payload.value);
+                        this.emit('change', { key: payload.key, value: payload.value });
+                    }
+                } else if (payload && payload.clear) {
+                    this.store.clear();
+                    this.emit('clear');
+                }
+            });
+        }
+    }
+
+    async set(key, value) {
+        if (this.serverCtx.isPrimary) {
+            this.store.set(key, value);
+            this.emit(`change:${key}`, value);
+            this.emit('change', { key, value });
+            
+            this.serverCtx.send({ 
+                method: 'cluster_state_sync', key, value, broadcast: true, master: false 
+            });
+            return true;
+        } else {
+            return new Promise((resolve, reject) => {
+                const messageId = uuid();
+                pendingPromises.set(messageId, { resolve, reject });
+                process.send({ id: this.serverCtx.id, messageId, method: 'cluster_state_set', key, value });
+            });
+        }
+    }
+
+    async get(key) {
+        if (this.serverCtx.isPrimary) {
+            return this.store.get(key);
+        } else {
+            return new Promise((resolve, reject) => {
+                const messageId = uuid();
+                pendingPromises.set(messageId, { resolve, reject });
+                process.send({ id: this.serverCtx.id, messageId, method: 'cluster_state_get', key });
+            });
+        }
+    }
+
+    async delete(key) {
+        if (this.serverCtx.isPrimary) {
+            const result = this.store.delete(key);
+            this.emit(`delete:${key}`);
+            this.emit('delete', { key });
+            this.serverCtx.send({ method: 'cluster_state_sync', key, value: undefined, broadcast: true, master: false });
+            return result;
+        } else {
+            return new Promise((resolve, reject) => {
+                const messageId = uuid();
+                pendingPromises.set(messageId, { resolve, reject });
+                process.send({ id: this.serverCtx.id, messageId, method: 'cluster_state_delete', key });
+            });
+        }
+    }
+
+    async size() {
+        if (this.serverCtx.isPrimary) return this.store.size;
+        return new Promise((resolve, reject) => {
+            const messageId = uuid();
+            pendingPromises.set(messageId, { resolve, reject });
+            process.send({ id: this.serverCtx.id, messageId, method: 'cluster_state_size' });
+        });
+    }
+
+    async clear() {
+        if (this.serverCtx.isPrimary) {
+            this.store.clear();
+            this.emit('clear');
+            this.serverCtx.send({ method: 'cluster_state_sync', clear: true, broadcast: true, master: false });
+            return true;
+        } else {
+            return new Promise((resolve, reject) => {
+                const messageId = uuid();
+                pendingPromises.set(messageId, { resolve, reject });
+                process.send({ id: this.serverCtx.id, messageId, method: 'cluster_state_clear' });
+            });
+        }
+    }
+}
 
 export class CoCreateServer extends EventEmitter {
     constructor() {
         super();
-        this.id = id;
+        this.id = process.env.SERVER_ID || null; // Will be properly initialized via Config in init()
         this.isPrimary = isPrimary;
         
         if (isPrimary) {
@@ -75,73 +174,29 @@ export class CoCreateServer extends EventEmitter {
         this.ip = null;
         this.infrastructure = null;
 
-        // Ingress state management flags
-        this.isCordon = false;
-        this.isShedding = false;
-        this.isDraining = false;
+        this.state = {
+            status: 'INITIALIZING', // INITIALIZING, ACTIVE, CORDONED, DRAINING, SHUTTING_DOWN
+            isCordon: false,
+            isShedding: false,
+            isDraining: false,
+            sheddingOrgs: new Set()
+        };
+        
+        // Initialize robust reactive cluster storage
+        this.store = new ClusterStateManager(this);
+        // Backwards compatibility for legacy workerStorage references
+        this.workerStorage = this.store;
 
         // Fallback servers for the Primary node
         this.fallbackHttpServer = null;
         this.fallbackHttpsServer = null;
 
-        this.on('cordon', (payload) => {
-            const active = payload?.active !== false;
-            
-            // Core Logic: Telemetry or callers cannot uncordon the node if shedding or draining is active
-            if (!active && (this.isShedding || this.isDraining)) {
-                console.warn(`[@cocreate/server] Blocked un-cordon request. Overriding active states: isShedding=${this.isShedding}, isDraining=${this.isDraining}`);
-                return;
-            }
-            
-            this.isCordon = active;
-            const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
-            console.log(`[@cocreate/server] ${processLabel} isCordon updated to: ${this.isCordon}`);
-        });
-
-        this.on('shed', (payload) => {
-            this.isShedding = payload?.active !== false;
-            
-            // Shedding state activation automatically triggers a network cordon
-            if (this.isShedding) {
-                this.isCordon = true;
-                
-                // Selective Shedding Integration: Target specified organizations inside the socket server
-                if (payload?.organizations && this.wsManager && typeof this.wsManager.destroyOrganizations === 'function') {
-                    const orgList = Array.isArray(payload.organizations) ? payload.organizations : [payload.organizations];
-                    console.log(`[@cocreate/server] Shedding event triggered. Selective eviction of org IDs:`, orgList);
-                    this.wsManager.destroyOrganizations(orgList);
-                }
-
-                // If shedding, proactively close edge listeners to refuse new connections
-                this.closeEdgeListeners();
-            } else {
-                this.restoreEdgeListeners();
-            }
-
-            const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
-            console.log(`[@cocreate/server] ${processLabel} isShedding updated to: ${this.isShedding} (isCordon: ${this.isCordon})`);
-        });
-
-        this.on('drain', (payload) => {
-            this.isDraining = payload?.active !== false;
-            
-            // Draining state activation automatically triggers a network cordon
-            if (this.isDraining) {
-                this.isCordon = true;
-                
-                // Complete Worker Drain Integration: Instantly purge all sockets and loaded maps
-                if (this.wsManager && typeof this.wsManager.destroyAll === 'function') {
-                    console.log(`[@cocreate/server] Worker-level drain event triggered. Purging all tenant configurations.`);
-                    this.wsManager.destroyAll();
-                }
-
-                // Disconnect edge completely
-                this.closeEdgeListeners();
-            }
-
-            const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
-            console.log(`[@cocreate/server] ${processLabel} isDraining updated to: ${this.isDraining} (isCordon: ${this.isCordon})`);
-        });
+        this.on('cordon', (payload) => this.cordon(payload, true));
+        this.on('shed', (payload) => this.shed(payload, true));
+        this.on('drain', (payload) => this.drain(payload, true));
+        this.on('restart', (payload) => this.restart(payload, true));
+        this.on('reboot', (payload) => this.reboot(payload, true));
+        this.on('shutdown', (payload) => this.shutdown(payload, true));
 
         this.http = Http.createServer((req, res) => {
             const requestUrl = req.url || '/';
@@ -154,7 +209,7 @@ export class CoCreateServer extends EventEmitter {
             const host = req.headers.host ? req.headers.host.split(':')[0] : 'localhost';
 
             // 2. Intercept with a 307 Temporary Redirect if cordon is active (but ports are still open)
-            if (this.isCordon) {
+            if (this.state.isCordon) {
                 res.writeHead(307, { "Location": `https://${host}${requestUrl}` });
                 return res.end();
             }
@@ -176,6 +231,247 @@ export class CoCreateServer extends EventEmitter {
         this.loader = null;
     }
 
+    /**
+     * Programmatically cordons or un-cordons the server node.
+     * Rejects new incoming connections or triggers 307 redirects when active.
+     * 
+     * @param {boolean|Object} [arg=true] - Boolean flag or detailed payload object
+     * @param {boolean} [fromEvent=false] - Internal flag to prevent propagation loops
+     */
+    cordon(arg = true, fromEvent = false) {
+        if (!fromEvent) {
+            const payload = (arg && typeof arg === 'object') ? arg : { value: arg };
+            payload.method = 'cordon';
+            this.send(payload);
+            return; // Let the event bus handle local execution via the listener
+        }
+
+        const isCordon = typeof arg === 'boolean' ? arg : (arg && arg.value !== undefined ? arg.value : true);
+        
+        if (!isCordon && (this.state.isShedding || this.state.isDraining)) {
+            console.warn(`[@cocreate/server] Blocked un-cordon request. Overriding active states: isShedding=${this.state.isShedding}, isDraining=${this.state.isDraining}`);
+            return;
+        }
+        
+        this.state.isCordon = isCordon;
+        this.updateLifecycleStatus();
+        
+        const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
+        console.log(`[@cocreate/server] ${processLabel} isCordon updated to: ${this.state.isCordon}`);
+    }
+
+    /**
+     * Programmatically sheds tenant workloads from active memory and sockets.
+     * Automatically cordons the node. Passing an empty array or false turns shedding off.
+     * 
+     * @param {string|string[]|Object} [arg=[]] - Org IDs to evict, or detailed payload
+     * @param {boolean} [fromEvent=false] - Internal flag to prevent propagation loops
+     */
+    shed(arg = [], fromEvent = false) {
+        if (!fromEvent) {
+            const payload = (arg && typeof arg === 'object' && !Array.isArray(arg)) 
+                ? arg 
+                : { organizations: arg === false ? false : (Array.isArray(arg) ? arg : (arg ? [arg] : [])) };
+            payload.method = 'shed';
+            this.send(payload);
+            return;
+        }
+
+        let organizations = [];
+        let isShedding = false;
+
+        if (arg === false) {
+            isShedding = false;
+        } else if (arg && arg.organizations !== undefined) {
+            if (arg.organizations === false) {
+                isShedding = false;
+            } else {
+                organizations = Array.isArray(arg.organizations) ? arg.organizations : [arg.organizations];
+                isShedding = organizations.length > 0;
+            }
+        } else if (arg) {
+            organizations = Array.isArray(arg) ? arg : (typeof arg === 'string' ? [arg] : []);
+            isShedding = organizations.length > 0;
+        }
+
+        this.state.isShedding = isShedding;
+        this.state.sheddingOrgs = new Set(organizations);
+        
+        if (this.state.isShedding) {
+            this.state.isCordon = true;
+            
+            if (organizations.length > 0 && this.wsManager && typeof this.wsManager.destroyOrganizations === 'function') {
+                console.log(`[@cocreate/server] Shedding event triggered. Selective eviction of org IDs:`, organizations);
+                this.wsManager.destroyOrganizations(organizations);
+            }
+
+            this.closeEdgeListeners();
+        } else {
+            this.restoreEdgeListeners();
+        }
+        
+        this.updateLifecycleStatus();
+
+        const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
+        console.log(`[@cocreate/server] ${processLabel} isShedding updated to: ${this.state.isShedding} (isCordon: ${this.state.isCordon})`);
+    }
+
+    /**
+     * Programmatically drains active client socket connections prior to restart or shutdown.
+     * Automatically cordons the node.
+     * 
+     * @param {boolean|Object} [arg=true] - Boolean flag or detailed payload object
+     * @param {boolean} [fromEvent=false] - Internal flag to prevent propagation loops
+     */
+    drain(arg = true, fromEvent = false) {
+        if (!fromEvent) {
+            const payload = (arg && typeof arg === 'object') ? arg : { value: arg };
+            payload.method = 'drain';
+            this.send(payload);
+            return;
+        }
+
+        const isDraining = typeof arg === 'boolean' ? arg : (arg && arg.value !== undefined ? arg.value : true);
+        this.state.isDraining = isDraining;
+        
+        if (this.state.isDraining) {
+            this.state.isCordon = true;
+            
+            if (this.wsManager && typeof this.wsManager.destroyAll === 'function') {
+                console.log(`[@cocreate/server] Worker-level drain event triggered. Purging all tenant configurations.`);
+                this.wsManager.destroyAll();
+            }
+
+            this.closeEdgeListeners();
+        }
+        
+        this.updateLifecycleStatus();
+
+        const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
+        console.log(`[@cocreate/server] ${processLabel} isDraining updated to: ${this.state.isDraining} (isCordon: ${this.state.isCordon})`);
+    }
+
+    /**
+     * Programmatically initiates a process restart for the context in which it is invoked.
+     * Takes zero arguments and acts directly on the local worker or primary process.
+     * 
+     * @param {Object} [payload={}] - Configuration payload for the restart action
+     * @param {boolean} [fromEvent=false] - Internal flag to prevent propagation loops
+     */
+    restart(payload = {}, fromEvent = false) {
+        if (!fromEvent) {
+            const sendPayload = (payload && typeof payload === 'object') ? payload : {};
+            sendPayload.method = 'restart';
+            this.send(sendPayload);
+            return;
+        }
+
+        if (this.isPrimary) {
+            if (payload && (payload.isPrimary || payload.master)) {
+                console.log(`[@cocreate/server] [PRIMARY] App restart commanded. Triggering global graceful shutdown...`);
+                if (this.triggerGlobalShutdown) this.triggerGlobalShutdown('API_RESTART');
+            }
+        } else {
+            if (payload && (payload.isPrimary || payload.master)) return;
+
+            console.log(`[@cocreate/server] [WORKER ${this.workerId}] Restart triggered. Commencing drain...`);
+            this.drain(true, true); // Direct internal execution of drain sequence
+            
+            setTimeout(() => {
+                console.log(`[@cocreate/server] [WORKER ${this.workerId}] Drain complete. Exiting for worker restart.`);
+                process.exit(0);
+            }, 3000); 
+        }
+    }
+
+    /**
+     * Programmatically initiates a full Operating System reboot.
+     * Drains all connections, closes mesh database bindings, and executes `sudo reboot`.
+     * 
+     * @param {Object} [payload={}] - Configuration payload for the reboot action
+     * @param {boolean} [fromEvent=false] - Internal flag to prevent propagation loops
+     */
+    reboot(payload = {}, fromEvent = false) {
+        if (!fromEvent) {
+            const sendPayload = (payload && typeof payload === 'object') ? payload : {};
+            sendPayload.method = 'reboot';
+            if (!this.isPrimary) sendPayload.master = true;
+            this.send(sendPayload);
+            return;
+        }
+
+        if (!this.isPrimary) return;
+
+        console.log(`[@cocreate/server] [PRIMARY] OS Reboot requested. Commencing graceful shutdown before kernel reboot...`);
+        if (this.triggerGlobalShutdown) {
+            this.triggerGlobalShutdown('OS_REBOOT', () => {
+                console.log(`[@cocreate/server] [PRIMARY] Executing OS Reboot: sudo reboot`);
+                exec('sudo reboot', (err) => {
+                    if (err) {
+                        console.error("[@cocreate/server] Failed to execute sudo reboot:", err.message);
+                        process.exit(1);
+                    }
+                });
+            });
+        }
+    }
+
+    /**
+     * Programmatically initiates a full Operating System poweroff/shutdown.
+     * Drains all connections, closes mesh database bindings, and executes `sudo poweroff`.
+     * 
+     * @param {Object} [payload={}] - Configuration payload for the shutdown action
+     * @param {boolean} [fromEvent=false] - Internal flag to prevent propagation loops
+     */
+    shutdown(payload = {}, fromEvent = false) {
+        if (!fromEvent) {
+            const sendPayload = (payload && typeof payload === 'object') ? payload : {};
+            sendPayload.method = 'shutdown';
+            if (!this.isPrimary) sendPayload.master = true;
+            this.send(sendPayload);
+            return;
+        }
+
+        if (!this.isPrimary) return;
+
+        console.log(`[@cocreate/server] [PRIMARY] OS Shutdown requested. Commencing graceful shutdown before VM poweroff...`);
+        if (this.triggerGlobalShutdown) {
+            this.triggerGlobalShutdown('OS_SHUTDOWN', () => {
+                console.log(`[@cocreate/server] [PRIMARY] Executing OS Poweroff: sudo poweroff`);
+                exec('sudo poweroff', (err) => {
+                    if (err) {
+                        console.error("[@cocreate/server] Failed to execute sudo poweroff:", err.message);
+                        process.exit(1);
+                    }
+                });
+            });
+        }
+    }
+
+    updateLifecycleStatus() {
+        let newStatus = 'ACTIVE';
+        if (isPrimaryShuttingDown) {
+            newStatus = 'SHUTTING_DOWN';
+        } else if (this.state.isDraining) {
+            newStatus = 'DRAINING';
+        } else if (this.state.isCordon) {
+            newStatus = 'CORDONED';
+        }
+
+        if (this.state.status !== newStatus) {
+            const oldStatus = this.state.status;
+            this.state.status = newStatus;
+            this.emit('status_change', { oldStatus, newStatus });
+            
+            if (this.isPrimary && this.mesh && typeof this.mesh.send === 'function' && newStatus !== 'INITIALIZING') {
+                // Broadcast state to mesh peers for distributed state awareness
+                try {
+                    this.mesh.send({ method: 'mesh.node_status_update', server_id: this.id, status: newStatus });
+                } catch (err) {}
+            }
+        }
+    }
+
     closeEdgeListeners() {
         if (this.isPrimary) return;
         if (this.http && this.http.listening) try { this.http.close(); } catch {}
@@ -183,7 +479,7 @@ export class CoCreateServer extends EventEmitter {
     }
 
     restoreEdgeListeners() {
-        if (this.isPrimary || this.isDraining) return; // Cannot restore if draining
+        if (this.isPrimary || this.state.isDraining) return;
         const HTTP_PORT = process.env.HTTP_PORT || 80;
         const HTTPS_PORT = process.env.HTTPS_PORT || 443;
         const BIND_IP = process.env.BIND_IP || '0.0.0.0';
@@ -199,13 +495,10 @@ export class CoCreateServer extends EventEmitter {
         }
 
         if (this.isPrimary) {
-            // --- MASTER SEND ROUTING PATHWAY ---
-            // 1. Dispatch locally on Master process unless explicitly bypassed
             if (payload.master !== false) {
                 this.emit(payload.method, payload);
             }
 
-            // 2. Compile target worker list dynamically using a flat ternary condition.
             let targetIds = [];
             if (payload.broadcast === true) {
                 targetIds = Array.from(this.workers.keys());
@@ -215,7 +508,6 @@ export class CoCreateServer extends EventEmitter {
                 targetIds = [parseInt(payload.worker, 10)];
             }
 
-            // 3. Dispatch to all compiled destination targets in a single unified loop.
             for (const wId of targetIds) {
                 const worker = this.workers.get(wId);
                 if (worker?.process && typeof worker.process.send === 'function' && worker.process.isConnected()) {
@@ -227,11 +519,8 @@ export class CoCreateServer extends EventEmitter {
                 }
             }
         } else {
-            // --- WORKER SEND ROUTING PATHWAY ---
-            // 1. Emit locally on this worker so native listeners trigger immediately
             this.emit(payload.method, payload);
 
-            // 2. Relay the message upstream to the Primary Orchestrator Process
             if (typeof process.send === 'function') {
                 try {
                     process.send({ ipcPayload: true, payload });
@@ -247,7 +536,7 @@ export class CoCreateServer extends EventEmitter {
 
         const allWorkersDown = Array.from(this.workers.values()).every(w => w.isListening === false);
 
-        if (allWorkersDown && !isPrimaryShuttingDown) {
+        if (allWorkersDown) {
             if (!this.fallbackHttpServer) {
                 const HTTP_PORT = process.env.HTTP_PORT || 80;
                 const HTTPS_PORT = process.env.HTTPS_PORT || 443;
@@ -269,7 +558,6 @@ export class CoCreateServer extends EventEmitter {
                 console.log(`[@cocreate/server] [PRIMARY] All workers cordoned/down. 307 Redirect Fallback active on ${BIND_IP}.`);
             }
         } else {
-            // If at least one worker comes back online, tear down the fallback
             if (this.fallbackHttpServer) {
                 try { this.fallbackHttpServer.close(); } catch {}
                 this.fallbackHttpServer = null;
@@ -290,25 +578,32 @@ export class CoCreateServer extends EventEmitter {
         this.isInitialized = true;
         setupIPC(this);
 
-        this.workerStorage = {
-            set: (key, value) => workerStorageManager(this, 'set', key, value),
-            get: (key) => workerStorageManager(this, 'get', key),
-            delete: (key) => workerStorageManager(this, 'delete', key),
-            size: () => workerStorageManager(this, 'size'),
-            clear: () => workerStorageManager(this, 'clear')
-        };
-
         const config = await Config.request({
             'organization_id': '',
             'host': '',
-            'workers': ''
+            'workers': '',
+            'server_id': ''
         });
 
         this.organization_id = config.organization_id || null;
         this.host = config.host || null;
 
-        let configuredWorkers = config.workers;
+        // Resolve Persistent Server ID Identity
+        if (this.isPrimary) {
+            if (config.server_id) {
+                this.id = config.server_id;
+            } else {
+                // If not found in config, generate and dynamically persist to global config state
+                this.id = process.env.SERVER_ID || ObjectId().toString();
+                await Config.request({ server_id: { value: this.id } });
+                console.log(`[@cocreate/server] [PRIMARY] Generated & persisted new Server ID: ${this.id}`);
+            }
+            process.env.SERVER_ID = this.id; // Bridge for child worker forks
+        } else {
+            this.id = process.env.SERVER_ID;
+        }
 
+        let configuredWorkers = config.workers;
         if (configuredWorkers !== false && configuredWorkers !== 'false') {
             const parsedWorkers = parseInt(configuredWorkers, 10);
             if (parsedWorkers === -1) {
@@ -327,13 +622,21 @@ export class CoCreateServer extends EventEmitter {
         this.autoscaler = ServerAutoscaler;
 
         if (this.isPrimary) {
-            console.log(`[@cocreate/server] [PRIMARY] Orchestrator running with PID: ${process.pid}`);            
+            console.log(`[@cocreate/server] [PRIMARY] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);            
             this.ip = await getIP();
             this.infrastructure = await resolveInfrastructure(this.id);
             await this.mesh.init(this);
             await this.autoscaler.init(this);
 
-            // Setup Primary process Graceful Signal Listeners
+            // Bridge remote Mesh network commands directly into local CoCreateServer event bus
+            const systemEvents = ['restart', 'reboot', 'shutdown', 'cordon', 'shed', 'drain'];
+            for (const eventName of systemEvents) {
+                this.mesh.on(eventName, (payload) => {
+                    console.log(`[@cocreate/server] [PRIMARY] Received remote mesh cluster command: "${eventName}"`);
+                    this.send(payload);
+                });
+            }
+
             setupPrimaryShutdownHooks(this);
             
             console.log(`[@cocreate/server] [PRIMARY] Orchestrator creating ${this.totalWorkers} workers.`);
@@ -348,7 +651,6 @@ export class CoCreateServer extends EventEmitter {
                         SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure)
                     });
 
-                    // Protect against unhandled 'error' events on the cluster worker wrapper
                     worker.on('error', (err) => {
                         console.error(`[@cocreate/server] [PRIMARY] Error on Worker ${currentWorkerId}:`, err.message);
                     });
@@ -361,7 +663,6 @@ export class CoCreateServer extends EventEmitter {
                     });
                 }
 
-                // Supervise and automatically reboot dead or crashed worker processes
                 cluster.on('exit', (worker, code, signal) => {
                     console.log(`[@cocreate/server] [PRIMARY] Worker ${worker.process.pid} exited (Code: ${code}, Signal: ${signal})`);
                     
@@ -373,17 +674,19 @@ export class CoCreateServer extends EventEmitter {
                             break;
                         }
                     }
-                    this.evaluatePrimaryFallback(); // Re-evaluate in case this was the last active worker
+                    this.evaluatePrimaryFallback();
 
-                    // SAFETY: If Primary is shutting down or draining, DO NOT fork a replacement worker process!
-                    if (isPrimaryShuttingDown || this.isDraining) {
+                    if (isPrimaryShuttingDown || this.state.isDraining) {
                         console.log(`[@cocreate/server] [PRIMARY] Worker ${worker.process.pid} removed. Draining active workers: ${activeWorkers.size} remaining.`);
                         
-                        // Dual-Lock Guard: Only exit Master if workers are dead AND mesh has completed the MongoDB prune
                         if (activeWorkers.size === 0 && isMeshClosed) {
-                            console.log("[@cocreate/server] [PRIMARY] All workers successfully drained and Mesh closed. Terminating master process cleanly.");
+                            console.log("[@cocreate/server] [PRIMARY] All workers successfully drained and Mesh closed.");
                             if (primaryShutdownTimeout) clearTimeout(primaryShutdownTimeout);
-                            process.exit(0);
+                            if (typeof shutdownCompletionCallback === 'function') {
+                                shutdownCompletionCallback();
+                            } else {
+                                process.exit(0);
+                            }
                         }
                         return;
                     }
@@ -414,7 +717,7 @@ export class CoCreateServer extends EventEmitter {
                 }
             }
         } else {
-            console.log(`[@cocreate/server] [WORKER ${this.workerId}] running with PID: ${process.pid}`);
+            console.log(`[@cocreate/server] [WORKER ${this.workerId}] running with PID: ${process.pid} (Server ID: ${this.id})`);
         }
 
         this.telemetry = await ServerTelemetry.init(this);
@@ -462,6 +765,8 @@ export class CoCreateServer extends EventEmitter {
             });
         }
 
+        this.updateLifecycleStatus();
+
         return this;
     }
 
@@ -483,39 +788,14 @@ export class CoCreateServer extends EventEmitter {
     }
 }
 
-function executeLocalWorkerStorageOperation(method, key, value) {
-    switch (method) {
-        case 'set': sharedMap.set(key, value); return true;
-        case 'get': return sharedMap.get(key);
-        case 'delete': return sharedMap.delete(key);
-        case 'size': return sharedMap.size;
-        case 'clear': sharedMap.clear(); return true;
-        default: throw new Error(`Unsupported storage key operation: "${method}"`);
-    }
-}
-
-function workerStorageManager(serverCtx, method, key, value) {
-    return new Promise((resolve, reject) => {
-        try {
-            if (serverCtx.isPrimary) {
-                resolve(executeLocalWorkerStorageOperation(method, key, value));
-            } else {
-                const messageId = uuid();
-                pendingPromises.set(messageId, { resolve, reject });
-                process.send({ id: serverCtx.id, messageId, method, key, value });
-            }
-        } catch (error) {
-            reject(error);
-        }
-    });
-}
-
 function setupPrimaryShutdownHooks(serverCtx) {
-    const handleSignal = async (signal) => {
+    serverCtx.triggerGlobalShutdown = async (signal = 'MANUAL_RESTART', completionCb = null) => {
         if (isPrimaryShuttingDown) return;
         isPrimaryShuttingDown = true;
-        serverCtx.isCordon = true;
-        serverCtx.isDraining = true;
+        serverCtx.state.isCordon = true;
+        serverCtx.state.isDraining = true;
+        serverCtx.updateLifecycleStatus();
+        shutdownCompletionCallback = completionCb;
 
         console.log(`\n[@cocreate/server] [PRIMARY] Process termination: ${signal}. Commencing graceful shutdown...`);
 
@@ -529,10 +809,19 @@ function setupPrimaryShutdownHooks(serverCtx) {
         }
         isMeshClosed = true;
 
+        const finalizeExecution = () => {
+            if (primaryShutdownTimeout) clearTimeout(primaryShutdownTimeout);
+            if (typeof shutdownCompletionCallback === 'function') {
+                shutdownCompletionCallback();
+            } else {
+                process.exit(0);
+            }
+        };
+
         if (activeWorkers.size === 0) {
             console.log("[@cocreate/server] [PRIMARY] All workers successfully drained. Terminating master process cleanly.");
-            if (primaryShutdownTimeout) clearTimeout(primaryShutdownTimeout);
-            process.exit(0);
+            finalizeExecution();
+            return;
         }
 
         console.log("[@cocreate/server] [PRIMARY] Informing worker processes to start local connection drains...");
@@ -554,13 +843,13 @@ function setupPrimaryShutdownHooks(serverCtx) {
                     try { worker.process.kill('SIGKILL'); } catch (err) {}
                 }
             }
-            process.exit(0);
+            finalizeExecution();
         }, 5000);
     };
 
-    process.on('SIGTERM', () => handleSignal('SIGTERM'));
-    process.on('SIGINT', () => handleSignal('SIGINT'));
-    process.on('SIGBREAK', () => handleSignal('SIGBREAK'));
+    process.on('SIGTERM', () => serverCtx.triggerGlobalShutdown('SIGTERM'));
+    process.on('SIGINT', () => serverCtx.triggerGlobalShutdown('SIGINT'));
+    process.on('SIGBREAK', () => serverCtx.triggerGlobalShutdown('SIGBREAK'));
 }
 
 function setupIPC(serverCtx) {
@@ -575,12 +864,32 @@ function setupIPC(serverCtx) {
                     }
                 }
             }
-            else if (message && message.id === serverCtx.id) {
+            else if (message && message.id === serverCtx.id && message.method && message.method.startsWith('cluster_state_')) {
                 try {
-                    message.value = executeLocalWorkerStorageOperation(message.method, message.key, message.value);
-                    worker.send(message);
+                    const action = message.method.replace('cluster_state_', '');
+                    if (action === 'set') {
+                        serverCtx.store.set(message.key, message.value).then(val => {
+                            message.value = val; worker.send(message);
+                        });
+                    } else if (action === 'get') {
+                        serverCtx.store.get(message.key).then(val => {
+                            message.value = val; worker.send(message);
+                        });
+                    } else if (action === 'delete') {
+                        serverCtx.store.delete(message.key).then(val => {
+                            message.value = val; worker.send(message);
+                        });
+                    } else if (action === 'size') {
+                        serverCtx.store.size().then(val => {
+                            message.value = val; worker.send(message);
+                        });
+                    } else if (action === 'clear') {
+                        serverCtx.store.clear().then(val => {
+                            message.value = val; worker.send(message);
+                        });
+                    }
                 } catch (error) {
-                    message.error = error.error;
+                    message.error = error.message || error.error;
                     worker.send(message);
                 }
             }
@@ -601,7 +910,9 @@ function setupIPC(serverCtx) {
         process.on('message', (message) => {
             if (message && message.type === 'shutdown') {
                 console.log(`[@cocreate/server] [WORKER ${process.pid}] Received master coordinated shutdown signal. Commencing local drain...`);
-                serverCtx.emit('drain', { active: true });
+                serverCtx.emit('drain', true);
+                
+                setTimeout(() => process.exit(0), 3000);
             }
             else if (message && message.id === serverCtx.id) {
                 const pending = pendingPromises.get(message.messageId);
@@ -616,6 +927,9 @@ function setupIPC(serverCtx) {
             }
             else if (message && message.ipcPayload && message.payload) {
                 serverCtx.emit(message.payload.method, message.payload);
+            }
+            else if (message && message.method === 'cluster_state_sync') {
+                serverCtx.emit('cluster_state_sync', message);
             }
         });
     }

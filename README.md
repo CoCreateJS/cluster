@@ -1,136 +1,315 @@
 # CoCreate Server
 
-A secure, stateless, clustered headless server built for high-performance multi-tenancy, real-time collaboration, and sandboxed AST execution. This module serves as the primary orchestrator of the CoCreate distributed ecosystem.
+A secure, stateless, clustered headless server built for high-performance multi-tenancy, real-time collaboration, dynamic process orchestration, and distributed mesh execution. This module serves as the primary orchestrator of the CoCreate ecosystem.
 
 ---
 
 ## Documentation
 
-For a complete guide and working integration configurations, refer to the [CoCreate Server Core Documentation](https://cocreatejs.com/docs/server).
+For a complete guide and working integration configurations, refer to the **[CoCreate Server Documentation](https://cocreatejs.com/docs/server)**.
+
+---
 
 ## Table of Contents
 
-* [The Power of the Clustered Headless Core](#the-power-of-the-clustered-headless-core)
-* [Why CoCreate Server?](#why-cocreate-server)
-* [The Architecture & Component Mesh](#the-architecture--component-mesh)
-* [Dynamic Tenant Eviction & Self-Healing Chain Reaction](#dynamic-tenant-eviction--self-healing-chain-reaction)
-* [Security-Hardened (Zero-Trust) Design](#security-hardened-zero-trust-design)
-* [Installation](#installation)
-* [Announcements](#announcements)
-* [Roadmap](#roadmap)
-* [How to Contribute](#how-to-contribute)
-* [About](#about)
+- [Architectural Overview & Core Design](#architectural-overview--core-design)
+- [Component Mesh Architecture](#component-mesh-architecture)
+- [Programmatic API Reference](#programmatic-api-reference)
+- [Ingress & Connection Controls (cordon, shed, drain)](#ingress--connection-controls-cordon-shed-drain)
+- [Process & OS Lifecycle Management (restart, reboot, shutdown)](#process--os-lifecycle-management-restart-reboot-shutdown)
+- [Reactive Cluster State Manager (server.store)](#reactive-cluster-state-manager-serverstore)
+- [Distributed Cluster Orchestration (@cocreate/server-mesh)](#distributed-cluster-orchestration-cocreateserver-mesh)
+- [Targeting Matrix & Routing Directives](#targeting-matrix--routing-directives)
+- [Self-Healing & Jittered Reconnection Logic](#self-healing--jittered-reconnection-logic)
+- [Dynamic Tenant Eviction & Cascading Teardown Sequence](#dynamic-tenant-eviction--cascading-teardown-sequence)
+- [Security-Hardened Design](#security-hardened-design)
+- [Installation & Startup](#installation--startup)
+- [Contributing & Community](#contributing--community)
 
 ---
 
-## The Power of the Clustered Headless Core
+## Architectural Overview & Core Design
 
-`@cocreate/server` is a high-performance system designed to scale multi-tenant, real-time collaboration applications with absolute efficiency. Instead of relying on a bloated runtime stack, it utilizes a native, zero-dependency clustered execution topology:
+`@cocreate/server` is engineered to run stateless, highly available workloads at scale across multi-core systems and distributed cloud nodes.
 
-### Multi-Cluster Native IPC Routing
+### Clustered IPC Architecture
 
-Leveraging the operating system's native multi-core process mapping, the Master orchestrator forks independent worker processes to maximize processing throughput. IPC relays dispatch state packets natively across workers with sub-millisecond overhead:
+The server operates a single Primary process that forks and manages worker processes across CPU cores. The Primary process serves as the central control plane, while Workers manage WebSocket client slices, file serving, and application logic.
 
-$$\text{Master Process (Primary)} \xrightarrow{\text{Direct OS IPC}} \begin{cases} \text{Worker 1} & \text{(Client Socket Slices)} \\ \text{Worker 2} & \text{(File / Asset Server)} \\ \text{Worker } N & \text{(AST Execution Engine)} \end{cases}$$
+$$
+\text{Master Process (Primary)}
+\xrightarrow{\text{Native OS Child IPC}}
+\begin{cases}
+\text{Worker 1} & \text{(Client Socket Tunnels)}\\
+\text{Worker 2} & \text{(Asset \& File Delivery)}\\
+\text{Worker }N & \text{(Execution Engine)}
+\end{cases}
+$$
 
-### Zero-Dependency Core Philosophy
+### Zero-Dependency Core
 
-To mitigate supply-chain vulnerabilities, prevent package bloat, and guarantee lightning-fast cold boot times, the server enforces a strict zero-dependency policy (the only exception being the highly audited `node-html-parser` for layout rendering).
+To minimize cold-boot latency, prevent supply-chain vulnerabilities, and maintain memory efficiency, the runtime enforces a strict zero-dependency core strategy (excluding audited internal module packages).
 
-### AST Flow Logic Isolation
+### Automatic Fallback & Cordoning
 
-The server does not evaluate raw user scripts. Dynamic client logic is executed exclusively within a locked-down Abstract Syntax Tree (AST) Flow Engine, eliminating Remote Code Execution (RCE) vectors at the structural level.
+When all worker processes are draining or cordoned, the Primary process automatically binds a temporary HTTP/HTTPS fallback server to dispatch `307 Temporary Redirect` responses with `Retry-After` headers, ensuring smooth traffic handling during maintenance or restarts.
 
 ---
 
-## Why CoCreate Server?
+## Component Mesh Architecture
 
-Traditional Node.js backend architectures struggle under high-concurrency multi-tenant loads due to memory-resident connection bloat and shared state conflicts.
-
-`@cocreate/server` solves this by decoupling computing power from database state. By serving as a purely stateless worker runtime, it fetches configurations, connection profiles, and execution routes dynamically from your secured database. If a compute node experiences a resource boundary or high traffic spikes, the `ServerAutoscaler` can cleanly cordon, drain, and destroy the machine while spawning fresh nodes to scale up without disrupting ongoing operations.
-
----
-
-## The Architecture & Component Mesh
-
-As the central gateway of the platform, the server imports and orchestrates peer modules to form a secure, unified collaboration fabric:
+`@cocreate/server` dynamically imports and orchestrates standalone core modules into a unified collaboration mesh.
 
 | Component Module | Architectural Role | Functional Responsibility |
 | :--- | :--- | :--- |
-| **@cocreate/acme** | Certificate Authority Integration | Generates and manages dynamic SSL certificates on-the-fly, dropping SSL-termination penalties. |
-| **@cocreate/socket-server** | Real-Time Transport Plane | Multiplexes end-user browser connections using low-overhead WebSocket tunnels. |
-| **@cocreate/server-mesh** | Inter-Node Control & Data Plane | Drives on-demand, lazy-loaded server-to-server tunnels isolated by Organization ID. |
-| **@cocreate/crud-server** | Multi-Database State Routing | Translates standard MongoDB-style JSON syntax into safe parallel database transactions. |
-| **@cocreate/server-autoscaler** | Autonomous Lifecycle Manager | Orchestrates horizontal scaling, P2P unicast cordon, and cooperative node draining. |
-| **@cocreate/lazy-loader** | Dynamic Assembly Parser | Lazily streams and constructs custom micro-app endpoints as they are requested. |
+| **@cocreate/acme** | Certificate Authority Integration | Provisioning and real-time SNI resolution of TLS certificates. |
+| **@cocreate/socket-server** | Real-Time Transport Plane | Multiplexing end-user client WebSockets with tenant isolation. |
+| **@cocreate/server-mesh** | Inter-Node Transport Fabric | Encrypted TLS P2P mesh sockets for inter-server communication. |
+| **@cocreate/crud-server** | Multi-Tenant Database Router | Translating abstract query payloads to database transactions. |
+| **@cocreate/server-autoscaler** | Lifecycle & Draining Engine | Monitoring resource utilization and orchestrating node scaling. |
+| **@cocreate/server-telemetry** | Observability Engine | Aggregating operational metrics, bandwidth usage, and node health. |
 
 ---
 
-## Dynamic Tenant Eviction & Self-Healing Chain Reaction
+## Programmatic API Reference
 
-To protect server RAM and database sockets, `@cocreate/server` utilizes an automated, connection-driven lifecycle. The network socket state acts as the single source of truth:
-
-$$\text{Final Client WebSocket Close} \xrightarrow{\text{60s Grace Period}} \text{Emit 'orgDeleted' locally} \xrightarrow{\text{Cooperative Teardown}} \begin{cases} \text{Close MongoDB Connection Pools} \\ \text{Flush Bandwidth \& Billing Telemetry} \\ \text{Close Dedicated P2P Org Tunnels} \end{cases}$$
-
-When the last client browser disconnects from an organization, a 60-second grace timer is initiated. If no clients reconnect, the worker emits a local `orgDeleted` signal. This executes a cascading teardown sequence:
-
-1. **`db.js`** catches the signal, closes the cached connection pools for that specific database, and frees socket slots.
-2. **`usage.js`** calculates remaining byte metrics in memory and flushes billing telemetry to the platform database.
-3. **`server_mesh.js`** calls `ws.close()` on any dedicated data-plane tunnels to peer servers. Peer servers catch the native TCP close frame and evict the routing records instantly with zero custom control packets.
+`CoCreateServer` inherits directly from `EventEmitter`. Control methods can be invoked programmatically via direct class methods or by emitting generic events.
 
 ---
 
-## Security-Hardened (Zero-Trust) Design
+## Ingress & Connection Controls (cordon, shed, drain)
 
-The server is engineered for deployment in highly restricted cloud networks (VPC/PrivateLink):
+### `server.cordon(value)`
 
-* **No Port Exposure:** All incoming server ports are closed except for standard secure web interfaces (80 / 443). SSH is disabled entirely.
-* **Administrative Isolation:** Control plane functions (such as node cordons, traffic shedding, or VM shutdowns) require interactive multi-factor authentication (2FA). Standard platform API keys do not possess the scope or rights to communicate on the 8090 P2P mesh control plane.
-* **Cryptographic Blindness:** Integration with client databases utilizes Client-Side Field-Level Encryption (CSFLE). Database connection strings and API keys are stored exclusively as ciphertexts. Plaintext decryption keys are fetched dynamically from isolated Cloud KMS modules and are never exposed to the database server.
+Toggles the node's cordon state. When `true`, edge traffic is declined and redirected via HTTP `307` responses.
 
----
+```javascript
+// Programmatic API
+server.cordon(true);
 
-## Installation
-
-### NPM Installation
-
-```bash
-npm i @cocreate/server
+// EventEmitter Equivalent
+server.emit("cordon", { value: true });
 ```
 
-### Yarn Installation
+### `server.shed(organizations)`
 
-```bash
-yarn add @cocreate/server
+Evicts client connections for specific organization IDs and automatically cordons the node. Passing an empty array (`[]`) or `false` clears shedding.
+
+```javascript
+// Evict specific tenants
+server.shed(["org_abc123", "org_xyz789"]);
+
+// Restore normal edge traffic listeners
+server.shed([]);
+```
+
+### `server.drain(value)`
+
+Purges active client WebSocket connections across all worker threads prior to planned maintenance or shutdown.
+
+```javascript
+// Initiate connection drain sequence
+server.drain(true);
 ```
 
 ---
 
-## Announcements
+## Process & OS Lifecycle Management (restart, reboot, shutdown)
 
-All structural updates, security audits, and API upgrades are documented in our `CHANGELOG.md` and the [CoCreate Server GitHub Releases](https://github.com/CoCreate-app/CoCreate-server/releases) page. You may also subscribe to our release notifications for breaking changes and deployment guidelines.
+### `server.restart(payload)`
+
+Initiates a graceful context restart.
+
+**Worker Context**
+
+- Drains active WebSocket connections.
+- Calls `process.exit(0)`.
+- Primary automatically forks a replacement worker.
+
+**Primary Context**
+
+- Performs a cluster-wide graceful shutdown.
+- Closes mesh connections.
+- Exits cleanly so service managers (such as `systemd`) can restart the application.
+
+```javascript
+// Restart current context
+server.restart();
+
+// Restart primary application
+server.restart({ isPrimary: true });
+```
+
+### `server.reboot(payload)`
+
+Gracefully reboots the operating system.
+
+```javascript
+server.reboot();
+```
+
+### `server.shutdown(payload)`
+
+Gracefully powers off the operating system.
+
+```javascript
+server.shutdown();
+```
 
 ---
 
-## Roadmap
+## Reactive Cluster State Manager (`server.store`)
 
-If you are interested in the future design direction of the core clustered engine, please review our active issues and pull requests. We welcome constructive architectural feedback from the developer community.
+Every `CoCreateServer` instance exposes a synchronized `ClusterStateManager` through `server.store`. State changes are replicated across all worker processes using Primary IPC.
+
+```javascript
+// Set a key
+await server.store.set("node_capacity", {
+    availableSlots: 45
+});
+
+// Read a key
+const capacity = await server.store.get("node_capacity");
+
+// Delete a key
+await server.store.delete("node_capacity");
+
+// Listen for changes
+server.store.on("change:node_capacity", (newValue) => {
+    console.log("Capacity updated:", newValue);
+});
+```
 
 ---
 
-## How to Contribute
+## Distributed Cluster Orchestration (`@cocreate/server-mesh`)
 
-We encourage contribution to our libraries (you might even score some nifty swag), please see our [CONTRIBUTING.md](https://github.com/CoCreate-app/CoCreate-server/blob/master/CONTRIBUTING.md) guide for details. If you encounter any bugs or wish to make feature requests, please submit an issue on our [GitHub Issues](https://github.com/CoCreate-app/CoCreate-server/issues) tracker. We want this library to be community-driven, and CoCreate led. We need your help to realize this goal.
+Inter-node communication is managed through `@cocreate/server-mesh`. Every transmitted message is automatically assigned a unique UUID for distributed tracing.
 
-For broader system configurations and API guides, please visit our [CoCreate Server Documentation](https://cocreatejs.com/docs/server).
+```javascript
+server.mesh.send({
+    method: "mesh.custom_command",
+    server: "server_node_b",
+    data: {
+        key: "value"
+    }
+});
+```
 
 ---
 
-## About
+## Targeting Matrix & Routing Directives
 
-`@cocreate/server` is designed, built, and supported by the CoCreate Developer Experience Team.
+The `server` key accepts either a single string identifier or an array of identifiers.
 
-> [!NOTE]
-> Please contact the Developer Experience Team via [GitHub Discussions](https://github.com/CoCreate-app/CoCreate-server/discussions) or join our Discord channel for any architecture or deployment queries.
+| Routing Intent | Mesh Payload | Behavior |
+| :--- | :--- | :--- |
+| Single Peer | `{ server: "node_b", method: "restart" }` | Routes exclusively to `node_b`. |
+| Multicast | `{ server: ["node_b","node_c"], method: "drain" }` | Sends concurrently to specified nodes. |
+| Worker Target | `{ server: "node_b", worker: 2, method: "restart" }` | Targets Worker 2 on `node_b`. |
+| Cluster Broadcast | `{ broadcast: true, method: "reboot" }` | Sends to every active node and local worker. |
 
-`@cocreate/server` is maintained and funded by CoCreate. The names and logos for CoCreate are trademarks of CoCreate, LLC.
+---
+
+## Self-Healing & Jittered Reconnection Logic
+
+When peer nodes disconnect, `@cocreate/server-mesh` uses exponential backoff with randomized jitter to eliminate thundering herd reconnect storms.
+
+$$
+T_{\text{delay}}
+=
+\min\left(30000,\,
+1000 \times 1.5^{\text{attempt}}
+\right)
++
+\text{random}(500,4500)
+\quad(ms)
+$$
+
+---
+
+## Dynamic Tenant Eviction & Cascading Teardown Sequence
+
+To conserve system memory and database connections, tenant lifecycle is driven entirely by client socket connectivity.
+
+$$
+\text{Client Disconnect}
+\xrightarrow{\text{60s Grace Window}}
+\text{Emit 'orgDeleted'}
+\rightarrow
+\begin{cases}
+\text{Release Database Pool Slots}\\
+\text{Flush Billing \& Telemetry Buffers}\\
+\text{Close Dedicated P2P Mesh Tunnels}
+\end{cases}
+$$
+
+When the final socket connection for an organization closes:
+
+1. A 60-second grace timer begins.
+2. If no new clients connect, the worker emits `mesh.deregisterOrg`.
+3. Once every local worker has evicted the organization, the Primary notifies peer nodes via `mesh.orgDeleted`.
+4. Database pools, telemetry buffers, and dedicated peer tunnels are released.
+
+---
+
+## Security-Hardened Design
+
+- **Zero Public Control Ports** — Administrative communication occurs exclusively over mutual TLS (mTLS) or encrypted WebSocket mesh connections on port `8090`. Public ingress remains limited to ports `80` and `443`.
+- **Cryptographic UUID Injection** — Every outbound mesh frame is stamped using `crypto.randomUUID()` for distributed tracing and replay protection.
+- **Ephemeral TLS Certificates** — Inter-node HTTPS/WSS communication uses dynamically generated TLS certificates with short lifetimes.
+
+---
+
+## Installation & Startup
+
+### Installation
+
+```bash
+npm install @cocreate/server
+```
+
+### Programmatic Initialization
+
+```javascript
+import CoCreateServer from "@cocreate/server";
+
+async function startServer() {
+    const server = await CoCreateServer.init();
+
+    server.on("status_change", ({ oldStatus, newStatus }) => {
+        console.log(
+            `Server transitioned from ${oldStatus} to ${newStatus}`
+        );
+    });
+}
+
+startServer();
+```
+
+---
+
+## Contributing & Community
+
+We welcome community contributions to CoCreate.
+
+Please review the following resources before submitting pull requests or feature requests:
+
+- **Documentation**  
+  https://cocreatejs.com/docs/server
+
+- **Contributing Guide**  
+  https://github.com/CoCreate-app/CoCreate-server/blob/master/CONTRIBUTING.md
+
+- **Issue Tracker**  
+  https://github.com/CoCreate-app/CoCreate-server/issues
+
+- **Discussions**  
+  https://github.com/CoCreate-app/CoCreate-server/discussions
+
+- **Releases**  
+  https://github.com/CoCreate-app/CoCreate-server/releases
+
+Maintained by **CoCreate, LLC**.
+
+Distributed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**.
