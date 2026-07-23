@@ -36,9 +36,20 @@ export function init(serverCtx, pendingPromises) {
                     if (w.pid === worker.process.pid) {
                         w.isListening = message.state;
                         serverCtx.evaluatePrimaryFallback();
-                        if (typeof serverCtx.publishState === 'function') {
-                            serverCtx.publishState();
-                        }
+                        serverCtx.publishState();
+                        break;
+                    }
+                }
+                return;
+            }
+
+            if (message.type === 'worker_state_change') {
+                for (let w of serverCtx.workers.values()) {
+                    if (w.pid === worker.process.pid) {
+                        if (message.isCordoned !== undefined) w.isCordoned = message.isCordoned;
+                        if (message.isDraining !== undefined) w.isDraining = message.isDraining;
+                        if (message.isShedding !== undefined) w.isShedding = message.isShedding;
+                        serverCtx.evaluatePrimaryFallback();
                         break;
                     }
                 }
@@ -76,10 +87,12 @@ export function init(serverCtx, pendingPromises) {
                 // Relaying or broadcasting worker commands across the cluster if requested
                 if (message.broadcast || message.workers || message.worker) {
                     serverCtx.send(message);
-                } else if (typeof serverCtx[message.method] === 'function') {
-                    serverCtx[message.method](message, true);
                 } else {
-                    serverCtx.emit(message.method, message, true);
+                    if (typeof serverCtx[message.method] === 'function') {
+                        serverCtx[message.method](message, true);
+                    } else {
+                        console.warn(`[@cocreate/server] [PRIMARY] Method '${message.method}' is not defined on serverCtx.`);
+                    }
                 }
             }
         });
@@ -98,13 +111,28 @@ export function init(serverCtx, pendingPromises) {
                     const w = serverCtx.workers.get(wId);
                     if (w) targetWorkers.push(w);
                 }
-            } else if (payload.broadcast) {
+            } else {
+                // Fallback to broadcast by default
                 for (const w of serverCtx.workers.values()) {
                     targetWorkers.push(w);
                 }
-            } else {
-                for (const w of serverCtx.workers.values()) {
-                    targetWorkers.push(w);
+            }
+
+            if (payload.method === 'cordon' || payload.method === 'drain') {
+                const isEnabling = typeof payload.value === 'boolean' ? payload.value : (payload.value !== false);
+                if (isEnabling) {
+                    const targetedIds = new Set(targetWorkers.map(w => w.id));
+                    let activeRemaining = 0;
+                    
+                    for (const w of serverCtx.workers.values()) {
+                        if (!targetedIds.has(w.id) && w.isListening && !w.isCordoned && !w.isDraining) {
+                            activeRemaining++;
+                        }
+                    }
+                    
+                    if (activeRemaining === 0) {
+                        serverCtx.evaluatePrimaryFallback();
+                    }
                 }
             }
 
@@ -119,12 +147,11 @@ export function init(serverCtx, pendingPromises) {
                 }
             }
 
-            // Execute locally on primary context if master flag is true or omitted
             if (payload.master !== false && payload.method) {
                 if (typeof serverCtx[payload.method] === 'function') {
                     serverCtx[payload.method](payload, true);
                 } else {
-                    serverCtx.emit(payload.method, payload, true);
+                    console.warn(`[@cocreate/server] [PRIMARY] Method '${payload.method}' is not defined on serverCtx.`);
                 }
             }
         };
@@ -132,15 +159,12 @@ export function init(serverCtx, pendingPromises) {
         process.on('message', async (message) => {
             if (!message || typeof message !== 'object') return;
 
+            // Sequential shutdown chain: Drain first -> publish final 'stopped' state -> exit process
             if (message.type === 'shutdown') {
-                console.log(`[@cocreate/server] [WORKER ${process.pid}] Received master coordinated shutdown signal. Commencing local drain...`);
-                if (typeof serverCtx.drain === 'function') {
-                    await serverCtx.drain(true, true);
-                } else {
-                    serverCtx.emit('drain', true);
-                }
-                
-                setTimeout(() => process.exit(0), 1000);
+                console.log(`[@cocreate/server] [WORKER ${process.pid}] Received master coordinated shutdown signal. Commencing local drain chain...`);
+                await serverCtx.drain(true, true);
+                await serverCtx.publishState('stopped');
+                setTimeout(() => process.exit(0), 500);
                 return;
             }
 
@@ -163,7 +187,7 @@ export function init(serverCtx, pendingPromises) {
                     if (typeof serverCtx[message.method] === 'function') {
                         serverCtx[message.method](message, true);
                     } else {
-                        serverCtx.emit(message.method, message, true);
+                        console.warn(`[@cocreate/server] [WORKER ${process.pid}] Method '${message.method}' is not defined on serverCtx.`);
                     }
                 }
             }
@@ -180,12 +204,11 @@ export function init(serverCtx, pendingPromises) {
                     console.error(`[@cocreate/server] [WORKER ${process.pid}] Failed to dispatch IPC message to primary:`, err.message);
                 }
             } else {
-                // If not connected to primary IPC, execute locally if method exists
                 if (payload.method) {
                     if (typeof serverCtx[payload.method] === 'function') {
                         serverCtx[payload.method](payload, true);
                     } else {
-                        serverCtx.emit(payload.method, payload, true);
+                        console.warn(`[@cocreate/server] [WORKER ${process.pid}] Method '${payload.method}' is not defined on serverCtx.`);
                     }
                 }
             }
