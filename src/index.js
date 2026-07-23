@@ -42,6 +42,8 @@ import { ObjectId, uuid } from '@cocreate/utils';
 // Dynamic environmental resolvers
 import resolveInfrastructure from './getInfrastructure.js';
 import getIP from './getIp.js';
+import IPC from './ipc.js';
+import Storage from './storage.js';
 
 const isPrimary = cluster.isPrimary !== undefined ? cluster.isPrimary : cluster.isMaster;
 
@@ -53,105 +55,6 @@ let isPrimaryShuttingDown = false;
 let isMeshClosed = false; // Dual-lock flag to guarantee DB prunes finish before process exits
 let primaryShutdownTimeout = null;
 let shutdownCompletionCallback = null;
-
-class ClusterStateManager extends EventEmitter {
-    constructor(serverCtx) {
-        super();
-        this.serverCtx = serverCtx;
-        this.store = new Map();
-        
-        // Listen for top-down state broadcasts from Master
-        if (!this.serverCtx.isPrimary) {
-            this.serverCtx.on('cluster_state_sync', (payload) => {
-                if (payload && payload.key !== undefined) {
-                    if (payload.value === undefined) {
-                        this.store.delete(payload.key);
-                        this.emit(`delete:${payload.key}`);
-                        this.emit('delete', { key: payload.key });
-                    } else {
-                        this.store.set(payload.key, payload.value);
-                        this.emit(`change:${payload.key}`, payload.value);
-                        this.emit('change', { key: payload.key, value: payload.value });
-                    }
-                } else if (payload && payload.clear) {
-                    this.store.clear();
-                    this.emit('clear');
-                }
-            });
-        }
-    }
-
-    async set(key, value) {
-        if (this.serverCtx.isPrimary) {
-            this.store.set(key, value);
-            this.emit(`change:${key}`, value);
-            this.emit('change', { key, value });
-            
-            this.serverCtx.send({ 
-                method: 'cluster_state_sync', key, value, broadcast: true, master: false 
-            });
-            return true;
-        } else {
-            return new Promise((resolve, reject) => {
-                const messageId = uuid();
-                pendingPromises.set(messageId, { resolve, reject });
-                process.send({ id: this.serverCtx.id, messageId, method: 'cluster_state_set', key, value });
-            });
-        }
-    }
-
-    async get(key) {
-        if (this.serverCtx.isPrimary) {
-            return this.store.get(key);
-        } else {
-            return new Promise((resolve, reject) => {
-                const messageId = uuid();
-                pendingPromises.set(messageId, { resolve, reject });
-                process.send({ id: this.serverCtx.id, messageId, method: 'cluster_state_get', key });
-            });
-        }
-    }
-
-    async delete(key) {
-        if (this.serverCtx.isPrimary) {
-            const result = this.store.delete(key);
-            this.emit(`delete:${key}`);
-            this.emit('delete', { key });
-            this.serverCtx.send({ method: 'cluster_state_sync', key, value: undefined, broadcast: true, master: false });
-            return result;
-        } else {
-            return new Promise((resolve, reject) => {
-                const messageId = uuid();
-                pendingPromises.set(messageId, { resolve, reject });
-                process.send({ id: this.serverCtx.id, messageId, method: 'cluster_state_delete', key });
-            });
-        }
-    }
-
-    async size() {
-        if (this.serverCtx.isPrimary) return this.store.size;
-        return new Promise((resolve, reject) => {
-            const messageId = uuid();
-            pendingPromises.set(messageId, { resolve, reject });
-            process.send({ id: this.serverCtx.id, messageId, method: 'cluster_state_size' });
-        });
-    }
-
-    async clear() {
-        if (this.serverCtx.isPrimary) {
-            this.store.clear();
-            this.emit('clear');
-            this.serverCtx.send({ method: 'cluster_state_sync', clear: true, broadcast: true, master: false });
-            return true;
-        } else {
-            return new Promise((resolve, reject) => {
-                const messageId = uuid();
-                pendingPromises.set(messageId, { resolve, reject });
-                process.send({ id: this.serverCtx.id, messageId, method: 'cluster_state_clear' });
-            });
-        }
-    }
-}
 
 export class CoCreateServer extends EventEmitter {
     constructor() {
@@ -175,21 +78,24 @@ export class CoCreateServer extends EventEmitter {
         this.infrastructure = null;
 
         this.state = {
-            status: 'INITIALIZING', // INITIALIZING, ACTIVE, CORDONED, DRAINING, SHUTTING_DOWN
+            status: 'RUNNING', // RUNNING, CORDONED, DRAINING, SHUTTING_DOWN, REBOOTING
             isCordon: false,
             isShedding: false,
             isDraining: false,
             sheddingOrgs: new Set()
         };
         
-        // Initialize robust reactive cluster storage
-        this.store = new ClusterStateManager(this);
-        // Backwards compatibility for legacy workerStorage references
-        this.workerStorage = this.store;
+        // Initialize reactive cluster storage
+        this.storage = new Storage(this, pendingPromises);
+        // Backwards compatibility for legacy store & workerStorage references
+        this.store = this.storage;
+        this.workerStorage = this.storage;
 
         // Fallback servers for the Primary node
         this.fallbackHttpServer = null;
         this.fallbackHttpsServer = null;
+
+        this.send = null;
 
         this.on('cordon', (payload) => this.cordon(payload, true));
         this.on('shed', (payload) => this.shed(payload, true));
@@ -232,18 +138,91 @@ export class CoCreateServer extends EventEmitter {
     }
 
     /**
+     * Generates a standard DB payload object for server document updates.
+     * 
+     * @param {Object} [data={}] - Target server object fields to update
+     * @returns {Object} CRUD payload structure for object.update
+     */
+    getServerObject(data = {}) {
+        return {
+            method: 'object.update',
+            array: 'servers',
+            object: {
+                _id: this.id,
+                ...data
+            },
+            upsert: true,
+            broadcast: true,
+            organization_id: this.organization_id,
+            host: this.host
+        };
+    }
+
+    /**
+     * Publishes the current lifecycle state of the process (Primary or Worker) directly to the DB.
+     * Constructs payload using getServerObject and executes explicit crud.send.
+     */
+    async publishState(overrideStatus) {
+        if (!this.crud || !this.id) return;
+
+        if (this.isPrimary) {
+            let dbStatus = overrideStatus || 'running';
+            if (!overrideStatus) {
+                if (this.state.status === 'SHUTTING_DOWN') dbStatus = 'stopped';
+                else if (this.state.status === 'REBOOTING') dbStatus = 'rebooting';
+                else if (this.state.status === 'CORDONED') dbStatus = 'cordoned';
+                else if (this.state.status === 'DRAINING') dbStatus = 'draining';
+            }
+
+            const payload = this.getServerObject({
+                ip: this.ip,
+                host: this.host,
+                status: dbStatus,
+                totalWorkers: this.totalWorkers,
+                infrastructure: this.infrastructure
+            });
+
+            try {
+                await this.crud.send(payload);
+                console.log(`[@cocreate/server] [PRIMARY] Published server state '${dbStatus}' to DB`);
+            } catch (err) {
+                console.error(`[@cocreate/server] [PRIMARY] Failed to publish server state to DB:`, err.message);
+            }
+        } else {
+            let dbStatus = overrideStatus || this.state.status.toLowerCase();
+            
+            const payload = this.getServerObject({
+                [`worker${this.workerId}`]: {
+                    pid: process.pid,
+                    status: dbStatus,
+                    isCordoned: this.state.isCordon,
+                    isShedding: this.state.isShedding,
+                    isDraining: this.state.isDraining
+                }
+            });
+
+            try {
+                await this.crud.send(payload);
+                console.log(`[@cocreate/server] [WORKER ${this.workerId}] Published worker state '${dbStatus}' to DB`);
+            } catch (err) {
+                console.error(`[@cocreate/server] [WORKER ${this.workerId}] Failed to publish worker state to DB:`, err.message);
+            }
+        }
+    }
+
+    /**
      * Programmatically cordons or un-cordons the server node.
      * Rejects new incoming connections or triggers 307 redirects when active.
      * 
      * @param {boolean|Object} [arg=true] - Boolean flag or detailed payload object
      * @param {boolean} [fromEvent=false] - Internal flag to prevent propagation loops
      */
-    cordon(arg = true, fromEvent = false) {
+    async cordon(arg = true, fromEvent = false) {
         if (!fromEvent) {
             const payload = (arg && typeof arg === 'object') ? arg : { value: arg };
             payload.method = 'cordon';
             this.send(payload);
-            return; // Let the event bus handle local execution via the listener
+            return;
         }
 
         const isCordon = typeof arg === 'boolean' ? arg : (arg && arg.value !== undefined ? arg.value : true);
@@ -258,6 +237,24 @@ export class CoCreateServer extends EventEmitter {
         
         const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
         console.log(`[@cocreate/server] ${processLabel} isCordon updated to: ${this.state.isCordon}`);
+
+        if (this.crud && this.id) {
+            let dbStatus = this.state.status.toLowerCase();
+            const updateFields = this.isPrimary ? {
+                status: dbStatus,
+                isCordon: this.state.isCordon
+            } : {
+                [`worker${this.workerId}.isCordoned`]: this.state.isCordon,
+                [`worker${this.workerId}.status`]: dbStatus
+            };
+
+            try {
+                await this.crud.send(this.getServerObject(updateFields));
+                console.log(`[@cocreate/server] ${processLabel} Synced cordon state to DB via dot-notation update`);
+            } catch (err) {
+                console.error(`[@cocreate/server] ${processLabel} Failed to sync cordon state to DB:`, err.message);
+            }
+        }
     }
 
     /**
@@ -267,7 +264,7 @@ export class CoCreateServer extends EventEmitter {
      * @param {string|string[]|Object} [arg=[]] - Org IDs to evict, or detailed payload
      * @param {boolean} [fromEvent=false] - Internal flag to prevent propagation loops
      */
-    shed(arg = [], fromEvent = false) {
+    async shed(arg = [], fromEvent = false) {
         if (!fromEvent) {
             const payload = (arg && typeof arg === 'object' && !Array.isArray(arg)) 
                 ? arg 
@@ -298,7 +295,7 @@ export class CoCreateServer extends EventEmitter {
         this.state.sheddingOrgs = new Set(organizations);
         
         if (this.state.isShedding) {
-            this.state.isCordon = true;
+            await this.cordon(true, true);
             
             if (organizations.length > 0 && this.wsManager && typeof this.wsManager.destroyOrganizations === 'function') {
                 console.log(`[@cocreate/server] Shedding event triggered. Selective eviction of org IDs:`, organizations);
@@ -314,6 +311,26 @@ export class CoCreateServer extends EventEmitter {
 
         const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
         console.log(`[@cocreate/server] ${processLabel} isShedding updated to: ${this.state.isShedding} (isCordon: ${this.state.isCordon})`);
+
+        if (this.crud && this.id) {
+            let dbStatus = this.state.status.toLowerCase();
+            const updateFields = this.isPrimary ? {
+                status: dbStatus,
+                isShedding: this.state.isShedding,
+                isCordon: this.state.isCordon
+            } : {
+                [`worker${this.workerId}.isShedding`]: this.state.isShedding,
+                [`worker${this.workerId}.isCordoned`]: this.state.isCordon,
+                [`worker${this.workerId}.status`]: dbStatus
+            };
+
+            try {
+                await this.crud.send(this.getServerObject(updateFields));
+                console.log(`[@cocreate/server] ${processLabel} Synced shed state to DB via dot-notation update`);
+            } catch (err) {
+                console.error(`[@cocreate/server] ${processLabel} Failed to sync shed state to DB:`, err.message);
+            }
+        }
     }
 
     /**
@@ -323,7 +340,7 @@ export class CoCreateServer extends EventEmitter {
      * @param {boolean|Object} [arg=true] - Boolean flag or detailed payload object
      * @param {boolean} [fromEvent=false] - Internal flag to prevent propagation loops
      */
-    drain(arg = true, fromEvent = false) {
+    async drain(arg = true, fromEvent = false) {
         if (!fromEvent) {
             const payload = (arg && typeof arg === 'object') ? arg : { value: arg };
             payload.method = 'drain';
@@ -335,7 +352,7 @@ export class CoCreateServer extends EventEmitter {
         this.state.isDraining = isDraining;
         
         if (this.state.isDraining) {
-            this.state.isCordon = true;
+            await this.cordon(true, true);
             
             if (this.wsManager && typeof this.wsManager.destroyAll === 'function') {
                 console.log(`[@cocreate/server] Worker-level drain event triggered. Purging all tenant configurations.`);
@@ -343,12 +360,34 @@ export class CoCreateServer extends EventEmitter {
             }
 
             this.closeEdgeListeners();
+        } else {
+            this.restoreEdgeListeners();
         }
         
         this.updateLifecycleStatus();
 
         const processLabel = this.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.workerId})`;
         console.log(`[@cocreate/server] ${processLabel} isDraining updated to: ${this.state.isDraining} (isCordon: ${this.state.isCordon})`);
+
+        if (this.crud && this.id) {
+            let dbStatus = this.state.status.toLowerCase();
+            const updateFields = this.isPrimary ? {
+                status: dbStatus,
+                isDraining: this.state.isDraining,
+                isCordon: this.state.isCordon
+            } : {
+                [`worker${this.workerId}.isDraining`]: this.state.isDraining,
+                [`worker${this.workerId}.isCordoned`]: this.state.isCordon,
+                [`worker${this.workerId}.status`]: dbStatus
+            };
+
+            try {
+                await this.crud.send(this.getServerObject(updateFields));
+                console.log(`[@cocreate/server] ${processLabel} Synced drain state to DB via dot-notation update`);
+            } catch (err) {
+                console.error(`[@cocreate/server] ${processLabel} Failed to sync drain state to DB:`, err.message);
+            }
+        }
     }
 
     /**
@@ -375,6 +414,7 @@ export class CoCreateServer extends EventEmitter {
             if (payload && (payload.isPrimary || payload.master)) return;
 
             console.log(`[@cocreate/server] [WORKER ${this.workerId}] Restart triggered. Commencing drain...`);
+            this.publishState('restarting');
             this.drain(true, true); // Direct internal execution of drain sequence
             
             setTimeout(() => {
@@ -403,6 +443,9 @@ export class CoCreateServer extends EventEmitter {
         if (!this.isPrimary) return;
 
         console.log(`[@cocreate/server] [PRIMARY] OS Reboot requested. Commencing graceful shutdown before kernel reboot...`);
+        this.state.status = 'REBOOTING';
+        this.publishState('rebooting');
+
         if (this.triggerGlobalShutdown) {
             this.triggerGlobalShutdown('OS_REBOOT', () => {
                 console.log(`[@cocreate/server] [PRIMARY] Executing OS Reboot: sudo reboot`);
@@ -435,6 +478,9 @@ export class CoCreateServer extends EventEmitter {
         if (!this.isPrimary) return;
 
         console.log(`[@cocreate/server] [PRIMARY] OS Shutdown requested. Commencing graceful shutdown before VM poweroff...`);
+        this.state.status = 'SHUTTING_DOWN';
+        this.publishState('stopped');
+
         if (this.triggerGlobalShutdown) {
             this.triggerGlobalShutdown('OS_SHUTDOWN', () => {
                 console.log(`[@cocreate/server] [PRIMARY] Executing OS Poweroff: sudo poweroff`);
@@ -449,7 +495,7 @@ export class CoCreateServer extends EventEmitter {
     }
 
     updateLifecycleStatus() {
-        let newStatus = 'ACTIVE';
+        let newStatus = 'RUNNING';
         if (isPrimaryShuttingDown) {
             newStatus = 'SHUTTING_DOWN';
         } else if (this.state.isDraining) {
@@ -463,13 +509,18 @@ export class CoCreateServer extends EventEmitter {
             this.state.status = newStatus;
             this.emit('status_change', { oldStatus, newStatus });
             
-            if (this.isPrimary && this.mesh && typeof this.mesh.send === 'function' && newStatus !== 'INITIALIZING') {
-                // Broadcast state to mesh peers for distributed state awareness
-                try {
-                    this.mesh.send({ method: 'mesh.node_status_update', server_id: this.id, status: newStatus });
-                } catch (err) {}
+            if (this.isPrimary) {
+                if (this.mesh && typeof this.mesh.send === 'function') {
+                    // Broadcast state to mesh peers for distributed state awareness
+                    try {
+                        this.mesh.send({ method: 'mesh.node_status_update', server_id: this.id, status: newStatus });
+                    } catch (err) {}
+                }
             }
         }
+        
+        // Push state dynamically (handles boolean flag changes even if base status string is identical)
+        this.publishState();
     }
 
     closeEdgeListeners() {
@@ -486,49 +537,6 @@ export class CoCreateServer extends EventEmitter {
 
         if (this.http && !this.http.listening) this.http.listen(HTTP_PORT, BIND_IP);
         if (this.https && !this.https.listening) this.https.listen(HTTPS_PORT, BIND_IP);
-    }
-
-    send(payload) {
-        if (!payload || !payload.method) {
-            console.error("[@cocreate/server] Cannot route IPC send without a 'method' definition.");
-            return;
-        }
-
-        if (this.isPrimary) {
-            if (payload.master !== false) {
-                this.emit(payload.method, payload);
-            }
-
-            let targetIds = [];
-            if (payload.broadcast === true) {
-                targetIds = Array.from(this.workers.keys());
-            } else if (Array.isArray(payload.workers)) {
-                targetIds = payload.workers.map(id => parseInt(id, 10));
-            } else if (payload.worker !== undefined) {
-                targetIds = [parseInt(payload.worker, 10)];
-            }
-
-            for (const wId of targetIds) {
-                const worker = this.workers.get(wId);
-                if (worker?.process && typeof worker.process.send === 'function' && worker.process.isConnected()) {
-                    try {
-                        worker.process.send({ ipcPayload: true, payload });
-                    } catch (err) {
-                        console.error(`[@cocreate/server] Failed sending to worker ${wId}:`, err);
-                    }
-                }
-            }
-        } else {
-            this.emit(payload.method, payload);
-
-            if (typeof process.send === 'function') {
-                try {
-                    process.send({ ipcPayload: true, payload });
-                } catch (err) {
-                    console.error("[@cocreate/server] Failed sending upstream IPC payload to Master:", err);
-                }
-            }
-        }
     }
 
     evaluatePrimaryFallback() {
@@ -576,7 +584,7 @@ export class CoCreateServer extends EventEmitter {
         }
 
         this.isInitialized = true;
-        setupIPC(this);
+        this.send = IPC.init(this, pendingPromises);
 
         const config = await Config.request({
             'organization_id': '',
@@ -621,12 +629,42 @@ export class CoCreateServer extends EventEmitter {
         this.mesh = ServerMesh;
         this.autoscaler = ServerAutoscaler;
 
+        // Setup process signals and graceful shutdown hooks for Primary or Worker
+        setupProcessShutdownHooks(this);
+
         if (this.isPrimary) {
             console.log(`[@cocreate/server] [PRIMARY] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);            
             this.ip = await getIP();
             this.infrastructure = await resolveInfrastructure(this.id);
             await this.mesh.init(this);
             await this.autoscaler.init(this);
+
+            // Register server initial 'running' profile to DB
+            this.publishState('running');
+            
+            // Zero-out all workers dynamically upon initial boot
+            if (this.totalWorkers > 0) {
+                const initialWorkerStates = {};
+                for (let i = 1; i <= this.totalWorkers; i++) {
+                    initialWorkerStates[`worker${i}`] = {
+                        pid: null,
+                        status: 'stopped',
+                        isCordoned: false,
+                        isShedding: false,
+                        isDraining: false
+                    };
+                }
+
+                if (this.crud && this.id) {
+                    const payload = this.getServerObject(initialWorkerStates);
+                    try {
+                        await this.crud.send(payload);
+                        console.log(`[@cocreate/server] [PRIMARY] Initialized ${this.totalWorkers} worker states in DB`);
+                    } catch (err) {
+                        console.error(`[@cocreate/server] [PRIMARY] Failed to initialize worker states in DB:`, err.message);
+                    }
+                }
+            }
 
             // Bridge remote Mesh network commands directly into local CoCreateServer event bus
             const systemEvents = ['restart', 'reboot', 'shutdown', 'cordon', 'shed', 'drain'];
@@ -637,19 +675,19 @@ export class CoCreateServer extends EventEmitter {
                 });
             }
 
-            setupPrimaryShutdownHooks(this);
-            
             console.log(`[@cocreate/server] [PRIMARY] Orchestrator creating ${this.totalWorkers} workers.`);
+
+            const generateWorkerEnv = (wId) => ({
+                WORKER_ID: String(wId),
+                SERVER_ID: String(this.id || ''),
+                SERVER_IP: String(this.ip || '127.0.0.1'),
+                SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure || {})
+            });
 
             if (this.totalWorkers > 1) {
                 for (let i = 0; i < this.totalWorkers; i++) {
                     const currentWorkerId = i + 1;
-                    const worker = cluster.fork({ 
-                        WORKER_ID: currentWorkerId,
-                        SERVER_ID: this.id,
-                        SERVER_IP: this.ip,
-                        SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure)
-                    });
+                    const worker = cluster.fork(generateWorkerEnv(currentWorkerId));
 
                     worker.on('error', (err) => {
                         console.error(`[@cocreate/server] [PRIMARY] Error on Worker ${currentWorkerId}:`, err.message);
@@ -663,7 +701,7 @@ export class CoCreateServer extends EventEmitter {
                     });
                 }
 
-                cluster.on('exit', (worker, code, signal) => {
+                cluster.on('exit', async (worker, code, signal) => {
                     console.log(`[@cocreate/server] [PRIMARY] Worker ${worker.process.pid} exited (Code: ${code}, Signal: ${signal})`);
                     
                     let deadWorkerId = null;
@@ -675,6 +713,24 @@ export class CoCreateServer extends EventEmitter {
                         }
                     }
                     this.evaluatePrimaryFallback();
+                    
+                    if (deadWorkerId && this.crud && this.id) {
+                        const payload = this.getServerObject({
+                            [`worker${deadWorkerId}`]: {
+                                pid: null,
+                                status: 'stopped',
+                                isCordoned: false,
+                                isShedding: false,
+                                isDraining: false
+                            }
+                        });
+                        try {
+                            await this.crud.send(payload);
+                            console.log(`[@cocreate/server] [PRIMARY] Reset worker${deadWorkerId} state in DB to stopped`);
+                        } catch (err) {
+                            console.error(`[@cocreate/server] [PRIMARY] Failed to reset worker${deadWorkerId} in DB:`, err.message);
+                        }
+                    }
 
                     if (isPrimaryShuttingDown || this.state.isDraining) {
                         console.log(`[@cocreate/server] [PRIMARY] Worker ${worker.process.pid} removed. Draining active workers: ${activeWorkers.size} remaining.`);
@@ -693,23 +749,22 @@ export class CoCreateServer extends EventEmitter {
 
                     const targetId = deadWorkerId || (activeWorkers.size + 1);
                     
-                    const newWorker = cluster.fork({ 
-                        WORKER_ID: targetId,
-                        SERVER_ID: this.id, 
-                        SERVER_IP: this.ip,
-                        SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure)
-                    });
+                    // Throttle respawns by 2 seconds to prevent infinite crash-looping if an environment error occurs
+                    setTimeout(() => {
+                        console.log(`[@cocreate/server] [PRIMARY] Respawning Worker ${targetId}...`);
+                        const newWorker = cluster.fork(generateWorkerEnv(targetId));
 
-                    newWorker.on('error', (err) => {
-                        console.error(`[@cocreate/server] [PRIMARY] Error on replacement Worker ${targetId}:`, err.message);
-                    });
+                        newWorker.on('error', (err) => {
+                            console.error(`[@cocreate/server] [PRIMARY] Error on replacement Worker ${targetId}:`, err.message);
+                        });
 
-                    activeWorkers.set(targetId, {
-                        id: targetId,
-                        pid: newWorker.process.pid,
-                        process: newWorker,
-                        isListening: false
-                    });
+                        activeWorkers.set(targetId, {
+                            id: targetId,
+                            pid: newWorker.process.pid,
+                            process: newWorker,
+                            isListening: false
+                        });
+                    }, 2000);
                 });
 
                 if (this.totalWorkers > 1) {
@@ -748,7 +803,13 @@ export class CoCreateServer extends EventEmitter {
         const BIND_IP = process.env.BIND_IP || '0.0.0.0';
 
         const reportListening = (state) => {
-            if (typeof process.send === 'function') process.send({ type: 'listening_state', state });
+            if (typeof process.send === 'function' && process.connected) {
+                try {
+                    process.send({ type: 'listening_state', state });
+                } catch (e) {
+                    // Ignore transient EPIPE IPC errors
+                }
+            }
         };
 
         if (this.http) {
@@ -788,6 +849,14 @@ export class CoCreateServer extends EventEmitter {
     }
 }
 
+function setupProcessShutdownHooks(serverCtx) {
+    if (serverCtx.isPrimary) {
+        setupPrimaryShutdownHooks(serverCtx);
+    } else {
+        setupWorkerShutdownHooks(serverCtx);
+    }
+}
+
 function setupPrimaryShutdownHooks(serverCtx) {
     serverCtx.triggerGlobalShutdown = async (signal = 'MANUAL_RESTART', completionCb = null) => {
         if (isPrimaryShuttingDown) return;
@@ -796,6 +865,9 @@ function setupPrimaryShutdownHooks(serverCtx) {
         serverCtx.state.isDraining = true;
         serverCtx.updateLifecycleStatus();
         shutdownCompletionCallback = completionCb;
+
+        const finalStatus = signal === 'OS_REBOOT' ? 'rebooting' : 'stopped';
+        serverCtx.publishState(finalStatus);
 
         console.log(`\n[@cocreate/server] [PRIMARY] Process termination: ${signal}. Commencing graceful shutdown...`);
 
@@ -852,87 +924,35 @@ function setupPrimaryShutdownHooks(serverCtx) {
     process.on('SIGBREAK', () => serverCtx.triggerGlobalShutdown('SIGBREAK'));
 }
 
-function setupIPC(serverCtx) {
-    if (serverCtx.isPrimary) {
-        cluster.on('message', (worker, message) => {
-            if (message && message.type === 'listening_state') {
-                for (let w of serverCtx.workers.values()) {
-                    if (w.pid === worker.process.pid) {
-                        w.isListening = message.state;
-                        serverCtx.evaluatePrimaryFallback();
-                        break;
-                    }
-                }
-            }
-            else if (message && message.id === serverCtx.id && message.method && message.method.startsWith('cluster_state_')) {
-                try {
-                    const action = message.method.replace('cluster_state_', '');
-                    if (action === 'set') {
-                        serverCtx.store.set(message.key, message.value).then(val => {
-                            message.value = val; worker.send(message);
-                        });
-                    } else if (action === 'get') {
-                        serverCtx.store.get(message.key).then(val => {
-                            message.value = val; worker.send(message);
-                        });
-                    } else if (action === 'delete') {
-                        serverCtx.store.delete(message.key).then(val => {
-                            message.value = val; worker.send(message);
-                        });
-                    } else if (action === 'size') {
-                        serverCtx.store.size().then(val => {
-                            message.value = val; worker.send(message);
-                        });
-                    } else if (action === 'clear') {
-                        serverCtx.store.clear().then(val => {
-                            message.value = val; worker.send(message);
-                        });
-                    }
-                } catch (error) {
-                    message.error = error.message || error.error;
-                    worker.send(message);
-                }
-            }
-            else if (message && message.ipcPayload && message.payload) {
-                const { payload } = message;
-                let senderWorkerId = null;
-                for (const [wId, w] of serverCtx.workers.entries()) {
-                    if (w.pid === worker.process.pid) {
-                        senderWorkerId = wId;
-                        break;
-                    }
-                }
-                payload.senderWorkerId = senderWorkerId;
-                serverCtx.send(payload);
-            }
-        });
-    } else {
-        process.on('message', (message) => {
-            if (message && message.type === 'shutdown') {
-                console.log(`[@cocreate/server] [WORKER ${process.pid}] Received master coordinated shutdown signal. Commencing local drain...`);
+function setupWorkerShutdownHooks(serverCtx) {
+    let isWorkerShuttingDown = false;
+
+    const handleWorkerShutdown = async (reason) => {
+        if (isWorkerShuttingDown) return;
+        isWorkerShuttingDown = true;
+        
+        console.log(`[@cocreate/server] [WORKER ${process.pid}] Caught terminal signal/shutdown event (${reason}). Initiating local drain...`);
+
+        try {
+            if (typeof serverCtx.drain === 'function') {
+                await serverCtx.drain(true, true);
+            } else {
                 serverCtx.emit('drain', true);
-                
-                setTimeout(() => process.exit(0), 3000);
             }
-            else if (message && message.id === serverCtx.id) {
-                const pending = pendingPromises.get(message.messageId);
-                if (pending) {
-                    pendingPromises.delete(message.messageId);
-                    if (message.error) {
-                        pending.reject(new Error(message.error));
-                    } else {
-                        pending.resolve(message.value);
-                    }
-                }
-            }
-            else if (message && message.ipcPayload && message.payload) {
-                serverCtx.emit(message.payload.method, message.payload);
-            }
-            else if (message && message.method === 'cluster_state_sync') {
-                serverCtx.emit('cluster_state_sync', message);
-            }
-        });
-    }
+        } catch (err) {
+            console.error(`[@cocreate/server] [WORKER ${process.pid}] Error during ${reason} drain:`, err.message);
+        }
+
+        setTimeout(() => {
+            console.log(`[@cocreate/server] [WORKER ${process.pid}] Drain complete after ${reason}. Exiting process.`);
+            process.exit(0);
+        }, 1000);
+    };
+
+    serverCtx.on('shutdown', () => handleWorkerShutdown('master_shutdown_signal'));
+    process.on('SIGINT', () => handleWorkerShutdown('SIGINT'));
+    process.on('SIGTERM', () => handleWorkerShutdown('SIGTERM'));
+    process.on('SIGBREAK', () => handleWorkerShutdown('SIGBREAK'));
 }
 
 export default new CoCreateServer();
