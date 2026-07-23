@@ -66,13 +66,7 @@ export class CoCreateServer extends EventEmitter {
         }
         
         this.totalWorkers = 0;
-        this.workerStorage = null;
         this.isInitialized = false;
-        
-        this.organization_id = null;
-        this.host = null;
-        this.ip = null;
-        this.infrastructure = null;
 
         // Initialize reactive cluster storage
         this.storage = new Storage(this, pendingPromises);
@@ -81,12 +75,6 @@ export class CoCreateServer extends EventEmitter {
 
         // Attach State Manager module (attaches cordon, shed, drain, publishState, process signals)
         State.init(this);
-
-        // Fallback servers for the Primary node
-        this.fallbackHttpServer = null;
-        this.fallbackHttpsServer = null;
-
-        this.send = null;
 
         // Primary unencrypted HTTP edge listener for ACME and redirect handling
         this.http = Http.createServer((req, res) => {
@@ -109,17 +97,9 @@ export class CoCreateServer extends EventEmitter {
             res.writeHead(301, { "Location": `https://${host}${requestUrl}` });
             res.end();
         });
-        
-        this.https = null;
-        this.mesh = null;
-        this.autoscaler = null;
+
         this.authenticate = authenticate;
         this.authorize = authorize;
-        this.wsManager = null;
-        this.crud = null;
-        this.telemetry = null;
-        this.files = null;
-        this.loader = null;
     }
 
     closeEdgeListeners() {
@@ -263,16 +243,16 @@ export class CoCreateServer extends EventEmitter {
                 });
             }
 
-            console.log(`[@cocreate/server] [PRIMARY] Orchestrator creating ${this.totalWorkers} workers.`);
-
-            const generateWorkerEnv = (wId) => ({
-                WORKER_ID: String(wId),
-                SERVER_ID: String(this.id || ''),
-                SERVER_IP: String(this.ip || '127.0.0.1'),
-                SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure || {})
-            });
-
             if (this.totalWorkers > 1) {
+                console.log(`[@cocreate/server] [PRIMARY] Orchestrator creating ${this.totalWorkers} workers.`);
+
+                const generateWorkerEnv = (wId) => ({
+                    WORKER_ID: String(wId),
+                    SERVER_ID: String(this.id || ''),
+                    SERVER_IP: String(this.ip || '127.0.0.1'),
+                    SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure || {})
+                });
+
                 for (let i = 0; i < this.totalWorkers; i++) {
                     const currentWorkerId = i + 1;
                     const worker = cluster.fork(generateWorkerEnv(currentWorkerId));
@@ -351,55 +331,65 @@ export class CoCreateServer extends EventEmitter {
 
                 return this;
             }
-        } else {
-            console.log(`[@cocreate/server] [WORKER ${this.workerId}] running with PID: ${process.pid} (Server ID: ${this.id})`);
         }
 
-        this.telemetry = await ServerTelemetry.init(this);
-        this.ip = process.env.SERVER_IP || await getIP();
-        
-        try {
-            this.infrastructure = process.env.SERVER_INFRASTRUCTURE 
-                ? JSON.parse(process.env.SERVER_INFRASTRUCTURE) 
-                : await resolveInfrastructure(this.id);
-        } catch (error) {
-            this.infrastructure = await resolveInfrastructure(this.id);
-        }
-
-        this.certificate = Acme;
-        this.httpsOptions = {
-            SNICallback: (domain, cb) => this.certificate.sniCallback(domain, cb)
-        };
-        this.https = Https.createServer(this.httpsOptions, (req, res) => this.handleEdgeRequest(req, res));
-        await this.certificate.init(this);
-
-        this.wsManager = new SocketServer(this);
-        this.api = await ApiServer.init(this);
-        this.files = FileServer.init(this);
-        this.loader = await LazyLoader.init(this);
-
-        const HTTP_PORT = process.env.HTTP_PORT || 80;
-        const HTTPS_PORT = process.env.HTTPS_PORT || 443;
-        const BIND_IP = process.env.BIND_IP || '0.0.0.0';
-
-        const reportListening = (state) => {
-            if (process.connected) {
-                process.send({ type: 'listening_state', state });
+        // Initialize worker services if process is a worker or if primary is running with <= 1 worker
+        if (!this.isPrimary || this.totalWorkers <= 1) {
+            if (!this.isPrimary) {
+                console.log(`[@cocreate/server] [WORKER ${this.workerId}] running with PID: ${process.pid} (Server ID: ${this.id})`);
             }
-        };
 
-        this.http.on('listening', () => reportListening(true));
-        this.http.on('close', () => reportListening(false));
-        this.http.listen(HTTP_PORT, BIND_IP, () => {
-            console.log(`[@cocreate/server] [WORKER ${this.workerId}] HTTP listening on ${BIND_IP}:${HTTP_PORT}`);
-        });
+            this.telemetry = await ServerTelemetry.init(this);
 
-        this.https.listen(HTTPS_PORT, BIND_IP, () => {
-            console.log(`[@cocreate/server] [WORKER ${this.workerId}] HTTPS listening on ${BIND_IP}:${HTTPS_PORT}`);
-        });
+            if (!this.ip) {
+                this.ip = process.env.SERVER_IP || await getIP();
+            }
 
-        // Publish worker active running state object to DB upon creation/startup
-        await this.publishState('running');
+            if (!this.infrastructure) {
+                try {
+                    this.infrastructure = process.env.SERVER_INFRASTRUCTURE 
+                        ? JSON.parse(process.env.SERVER_INFRASTRUCTURE) 
+                        : await resolveInfrastructure(this.id);
+                } catch (error) {
+                    this.infrastructure = await resolveInfrastructure(this.id);
+                }
+            }
+
+            this.certificate = Acme;
+            this.httpsOptions = {
+                SNICallback: (domain, cb) => this.certificate.sniCallback(domain, cb)
+            };
+            this.https = Https.createServer(this.httpsOptions, (req, res) => this.handleEdgeRequest(req, res));
+            await this.certificate.init(this);
+
+            this.wsManager = new SocketServer(this);
+            this.api = await ApiServer.init(this);
+            this.files = FileServer.init(this);
+            this.loader = await LazyLoader.init(this);
+
+            const HTTP_PORT = process.env.HTTP_PORT || 80;
+            const HTTPS_PORT = process.env.HTTPS_PORT || 443;
+            const BIND_IP = process.env.BIND_IP || '0.0.0.0';
+
+            const reportListening = (state) => {
+                if (process.connected) {
+                    process.send({ type: 'listening_state', state });
+                }
+            };
+
+            this.http.on('listening', () => reportListening(true));
+            this.http.on('close', () => reportListening(false));
+            this.http.listen(HTTP_PORT, BIND_IP, () => {
+                console.log(`[@cocreate/server] [WORKER ${this.workerId}] HTTP listening on ${BIND_IP}:${HTTP_PORT}`);
+            });
+
+            this.https.listen(HTTPS_PORT, BIND_IP, () => {
+                console.log(`[@cocreate/server] [WORKER ${this.workerId}] HTTPS listening on ${BIND_IP}:${HTTPS_PORT}`);
+            });
+
+            // Publish worker active running state object to DB upon creation/startup
+            await this.publishState('running');
+        }
 
         return this;
     }
