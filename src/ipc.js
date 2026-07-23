@@ -20,118 +20,78 @@ import cluster from 'node:cluster';
 
 /**
  * Initializes Inter-Process Communication (IPC) transport routing between 
- * the Primary orchestrator and clustered Worker processes.
+ * the Master orchestrator and clustered Worker processes.
  * 
- * @param {Object} serverCtx - The CoCreateServer instance reference
+ * @param {Object} Server - The CoCreateServer instance reference
  * @param {Map} pendingPromises - Tracking map for async worker RPC promises
  * @returns {Function} Context-aware send function for dispatching cluster messages
  */
-export function init(serverCtx, pendingPromises) {
-    if (serverCtx.isPrimary) {
+export function init(Server, pendingPromises) {
+    if (Server.isMaster) {
         cluster.on('message', async (worker, message) => {
             if (!message || typeof message !== 'object') return;
 
-            if (message.type === 'listening_state') {
-                for (let w of serverCtx.workers.values()) {
-                    if (w.pid === worker.process.pid) {
-                        w.isListening = message.state;
-                        serverCtx.evaluatePrimaryFallback();
-                        serverCtx.publishState();
-                        break;
-                    }
-                }
-                return;
-            }
-
-            if (message.type === 'worker_state_change') {
-                for (let w of serverCtx.workers.values()) {
-                    if (w.pid === worker.process.pid) {
-                        if (message.isCordoned !== undefined) w.isCordoned = message.isCordoned;
-                        if (message.isDraining !== undefined) w.isDraining = message.isDraining;
-                        if (message.isShedding !== undefined) w.isShedding = message.isShedding;
-                        serverCtx.evaluatePrimaryFallback();
-                        break;
-                    }
-                }
-                return;
-            }
-
-            if (message.id === serverCtx.id && message.method && message.method.startsWith('cluster_state_')) {
-                const { messageId, method, key, value } = message;
-                try {
-                    let result;
-                    if (method === 'cluster_state_set') {
-                        result = await serverCtx.storage.set(key, value);
-                    } else if (method === 'cluster_state_get') {
-                        result = await serverCtx.storage.get(key);
-                    } else if (method === 'cluster_state_delete') {
-                        result = await serverCtx.storage.delete(key);
-                    } else if (method === 'cluster_state_size') {
-                        result = await serverCtx.storage.size();
-                    } else if (method === 'cluster_state_clear') {
-                        result = await serverCtx.storage.clear();
-                    }
-                    
-                    if (messageId && worker.send && worker.isConnected()) {
-                        worker.send({ messageId, result, success: true });
-                    }
-                } catch (err) {
-                    if (messageId && worker.send && worker.isConnected()) {
-                        worker.send({ messageId, error: err.message, success: false });
-                    }
-                }
-                return;
-            }
-
-            if (message.id === serverCtx.id && message.method) {
-                // Relaying or broadcasting worker commands across the cluster if requested
-                if (message.broadcast || message.workers || message.worker) {
-                    serverCtx.send(message);
+            // 1. Resolve pending RPC promise if messageId matches
+            if (message.messageId && pendingPromises.has(message.messageId)) {
+                const promiseHandler = pendingPromises.get(message.messageId);
+                pendingPromises.delete(message.messageId);
+                if (message.success) {
+                    promiseHandler.resolve(message.result);
                 } else {
-                    if (typeof serverCtx[message.method] === 'function') {
-                        serverCtx[message.method](message, true);
-                    } else {
-                        console.warn(`[@cocreate/server] [PRIMARY] Method '${message.method}' is not defined on serverCtx.`);
-                    }
+                    promiseHandler.reject(new Error(message.error || 'IPC RPC Request Failed'));
                 }
+                return;
+            }
+
+            // 2. Emit event locally on Master for subscribers (e.g. log, state, storage)
+            if (message.method) {
+                Server.emit(message.method, message);
+            }
+
+            // 3. Relay broadcast or targeted messages to other workers
+            if (message.broadcast || message.worker) {
+                send(message);
             }
         });
 
-        return function send(payload = {}) {
+        function send(payload = {}) {
             if (!payload || typeof payload !== 'object') return;
-            payload.id = serverCtx.id;
+            payload.id = Server.id;
 
             const targetWorkers = [];
 
             if (payload.worker) {
-                const w = serverCtx.workers.get(payload.worker);
-                if (w) targetWorkers.push(w);
-            } else if (Array.isArray(payload.workers)) {
-                for (const wId of payload.workers) {
-                    const w = serverCtx.workers.get(wId);
+                if (Array.isArray(payload.worker)) {
+                    for (const wId of payload.worker) {
+                        const w = Server.workers.get(wId);
+                        if (w) targetWorkers.push(w);
+                    }
+                } else {
+                    const w = Server.workers.get(payload.worker);
                     if (w) targetWorkers.push(w);
                 }
             } else {
-                // Fallback to broadcast by default
-                for (const w of serverCtx.workers.values()) {
+                // Broadcast to all workers by default if no specific worker specified
+                for (const w of Server.workers.values()) {
                     targetWorkers.push(w);
                 }
             }
 
+            // Check edge listener fallback conditions for cordon/drain commands
             if (payload.method === 'cordon' || payload.method === 'drain') {
                 const isEnabling = typeof payload.value === 'boolean' ? payload.value : (payload.value !== false);
                 if (isEnabling) {
                     const targetedIds = new Set(targetWorkers.map(w => w.id));
                     let activeRemaining = 0;
                     
-                    for (const w of serverCtx.workers.values()) {
+                    for (const w of Server.workers.values()) {
                         if (!targetedIds.has(w.id) && w.isListening && !w.isCordoned && !w.isDraining) {
                             activeRemaining++;
                         }
                     }
                     
                     if (activeRemaining === 0) {
-                        serverCtx.evaluatePrimaryFallback();
+                        Server.evaluateMasterFallback();
                     }
                 }
             }
@@ -142,31 +102,21 @@ export function init(serverCtx, pendingPromises) {
                     try {
                         workerProcess.send(payload);
                     } catch (err) {
-                        console.error(`[@cocreate/server] [PRIMARY] Failed to send IPC payload to worker ${workerObj.id}:`, err.message);
+                        console.error(`[@cocreate/server] [MASTER] Failed to send IPC payload to worker ${workerObj.id}:`, err.message);
                     }
                 }
             }
 
+            // Fire event locally on Master process unless explicitly turned off via master: false
             if (payload.master !== false && payload.method) {
-                if (typeof serverCtx[payload.method] === 'function') {
-                    serverCtx[payload.method](payload, true);
-                } else {
-                    console.warn(`[@cocreate/server] [PRIMARY] Method '${payload.method}' is not defined on serverCtx.`);
-                }
+                Server.emit(payload.method, payload);
             }
-        };
+        }
+
+        return send;
     } else {
         process.on('message', async (message) => {
             if (!message || typeof message !== 'object') return;
-
-            // Sequential shutdown chain: Drain first -> publish final 'stopped' state -> exit process
-            if (message.type === 'shutdown') {
-                console.log(`[@cocreate/server] [WORKER ${process.pid}] Received master coordinated shutdown signal. Commencing local drain chain...`);
-                await serverCtx.drain(true, true);
-                await serverCtx.publishState('stopped');
-                setTimeout(() => process.exit(0), 500);
-                return;
-            }
 
             if (message.messageId && pendingPromises.has(message.messageId)) {
                 const promiseHandler = pendingPromises.get(message.messageId);
@@ -180,36 +130,24 @@ export function init(serverCtx, pendingPromises) {
                 return;
             }
 
-            if (message.id === serverCtx.id) {
-                if (message.method === 'cluster_state_sync') {
-                    serverCtx.emit('cluster_state_sync', message);
-                } else if (message.method) {
-                    if (typeof serverCtx[message.method] === 'function') {
-                        serverCtx[message.method](message, true);
-                    } else {
-                        console.warn(`[@cocreate/server] [WORKER ${process.pid}] Method '${message.method}' is not defined on serverCtx.`);
-                    }
-                }
+            if (message.method) {
+                Server.emit(message.method, message);
             }
         });
 
         return function send(payload = {}) {
             if (!payload || typeof payload !== 'object') return;
-            payload.id = serverCtx.id;
+            payload.id = Server.id;
 
             if (typeof process.send === 'function' && process.connected) {
                 try {
                     process.send(payload);
                 } catch (err) {
-                    console.error(`[@cocreate/server] [WORKER ${process.pid}] Failed to dispatch IPC message to primary:`, err.message);
+                    console.error(`[@cocreate/server] [WORKER ${process.pid}] Failed to dispatch IPC message to master:`, err.message);
                 }
             } else {
                 if (payload.method) {
-                    if (typeof serverCtx[payload.method] === 'function') {
-                        serverCtx[payload.method](payload, true);
-                    } else {
-                        console.warn(`[@cocreate/server] [WORKER ${process.pid}] Method '${payload.method}' is not defined on serverCtx.`);
-                    }
+                    Server.emit(payload.method, payload);
                 }
             }
         };

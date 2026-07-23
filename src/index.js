@@ -43,8 +43,9 @@ import getIP from './getIp.js';
 import IPC from './ipc.js';
 import Storage from './storage.js';
 import State from './state.js';
+import LogManager from './log.js';
 
-const isPrimary = cluster.isPrimary !== undefined ? cluster.isPrimary : cluster.isMaster;
+const isMaster = cluster.isMaster;
 
 const pendingPromises = new Map();
 const activeWorkers = new Map();
@@ -57,9 +58,10 @@ export class CoCreateServer extends EventEmitter {
     constructor() {
         super();
         this.id = process.env.SERVER_ID || null;
-        this.isPrimary = isPrimary;
         
-        if (isPrimary) {
+        this.isMaster = isMaster;
+        
+        if (this.isMaster) {
             this.workers = activeWorkers;
         } else {
             this.workerId = parseInt(process.env.WORKER_ID, 10) || 1;
@@ -76,7 +78,10 @@ export class CoCreateServer extends EventEmitter {
         // Attach State Manager module (attaches cordon, shed, drain, publishState, process signals)
         State.init(this);
 
-        // Primary unencrypted HTTP edge listener for ACME and redirect handling
+        // Attach Log Manager module
+        this.logManager = LogManager.init(this);
+
+        // Master unencrypted HTTP edge listener for ACME and redirect handling
         this.http = Http.createServer((req, res) => {
             const requestUrl = req.url || '/';
             
@@ -103,23 +108,23 @@ export class CoCreateServer extends EventEmitter {
     }
 
     closeEdgeListeners() {
-        if (this.isPrimary) return;
-        if (this.http.listening) this.http.close();
-        if (this.https.listening) this.https.close();
+        if (this.isMaster) return;
+        if (this.http && this.http.listening) this.http.close();
+        if (this.https && this.https.listening) this.https.close();
     }
 
     restoreEdgeListeners() {
-        if (this.isPrimary || this.state.isDraining) return;
+        if (this.isMaster || this.state.isDraining) return;
         const HTTP_PORT = process.env.HTTP_PORT || 80;
         const HTTPS_PORT = process.env.HTTPS_PORT || 443;
         const BIND_IP = process.env.BIND_IP || '0.0.0.0';
 
         if (!this.http.listening) this.http.listen(HTTP_PORT, BIND_IP);
-        if (!this.https.listening) this.https.listen(HTTPS_PORT, BIND_IP);
+        if (this.https && !this.https.listening) this.https.listen(HTTPS_PORT, BIND_IP);
     }
 
-    evaluatePrimaryFallback() {
-        if (!this.isPrimary) return;
+    evaluateMasterFallback() {
+        if (!this.isMaster) return;
 
         const allWorkersDown = Array.from(this.workers.values()).every(w => w.isListening === false);
 
@@ -142,7 +147,7 @@ export class CoCreateServer extends EventEmitter {
                     this.fallbackHttpsServer = Https.createServer(this.httpsOptions, handleRedirect);
                     this.fallbackHttpsServer.listen(HTTPS_PORT, BIND_IP);
                 }
-                console.log(`[@cocreate/server] [PRIMARY] All workers cordoned/down. 307 Redirect Fallback active on ${BIND_IP}.`);
+                console.log(`[@cocreate/server] [MASTER] All workers cordoned/down. 307 Redirect Fallback active on ${BIND_IP}.`);
             }
         } else {
             if (this.fallbackHttpServer) {
@@ -152,7 +157,7 @@ export class CoCreateServer extends EventEmitter {
                     this.fallbackHttpsServer.close();
                     this.fallbackHttpsServer = null;
                 }
-                console.log(`[@cocreate/server] [PRIMARY] Workers active. 307 Redirect Fallback disabled.`);
+                console.log(`[@cocreate/server] [MASTER] Workers active. 307 Redirect Fallback disabled.`);
             }
         }
     }
@@ -175,14 +180,13 @@ export class CoCreateServer extends EventEmitter {
         this.organization_id = config.organization_id || null;
         this.host = config.host || null;
 
-        // Resolve Persistent Server ID Identity
-        if (this.isPrimary) {
+        if (this.isMaster) {
             if (config.server_id) {
                 this.id = config.server_id;
             } else {
                 this.id = process.env.SERVER_ID || ObjectId().toString();
                 await Config.request({ server_id: { value: this.id } });
-                console.log(`[@cocreate/server] [PRIMARY] Generated & persisted new Server ID: ${this.id}`);
+                console.log(`[@cocreate/server] [MASTER] Generated & persisted new Server ID: ${this.id}`);
             }
             process.env.SERVER_ID = this.id;
         } else {
@@ -199,7 +203,7 @@ export class CoCreateServer extends EventEmitter {
             }
         }
 
-        if (this.isPrimary && this.totalWorkers <= 1) {
+        if (this.isMaster && this.totalWorkers <= 1) {
             this.workerId = 1;
         }
 
@@ -207,14 +211,18 @@ export class CoCreateServer extends EventEmitter {
         this.mesh = ServerMesh;
         this.autoscaler = ServerAutoscaler;
 
-        if (this.isPrimary) {
-            console.log(`[@cocreate/server] [PRIMARY] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);            
+        if (this.isMaster) {
+            console.log(`[@cocreate/server] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);            
             this.ip = await getIP();
             this.infrastructure = await resolveInfrastructure(this.id);
             await this.mesh.init(this);
             await this.autoscaler.init(this);
 
-            // Register initial running profile to DB for Primary
+            // Reset logs array for a fresh logging session on master startup
+            await this.crud.send(this.getServerObject({ logs: [] }));
+            console.log(`[@cocreate/server] [MASTER] Cleared previous server logs (logs: []) for new session.`);
+
+            // Register initial running profile to DB for Master
             await this.publishState();
             
             // Zero-out worker states in DB upon master initialization
@@ -231,20 +239,20 @@ export class CoCreateServer extends EventEmitter {
                 }
 
                 await this.crud.send(this.getServerObject(initialWorkerStates));
-                console.log(`[@cocreate/server] [PRIMARY] Initialized ${this.totalWorkers} worker state slots in DB`);
+                console.log(`[@cocreate/server] [MASTER] Initialized ${this.totalWorkers} worker state slots in DB`);
             }
 
             // Route mesh commands to IPC
             const systemEvents = ['restart', 'reboot', 'shutdown', 'cordon', 'shed', 'drain'];
             for (const eventName of systemEvents) {
                 this.mesh.on(eventName, (payload) => {
-                    console.log(`[@cocreate/server] [PRIMARY] Received remote mesh command: "${eventName}"`);
+                    console.log(`[@cocreate/server] [MASTER] Received remote mesh command: "${eventName}"`);
                     this.send(payload);
                 });
             }
 
             if (this.totalWorkers > 1) {
-                console.log(`[@cocreate/server] [PRIMARY] Orchestrator creating ${this.totalWorkers} workers.`);
+                console.log(`[@cocreate/server] [MASTER] Orchestrator creating ${this.totalWorkers} workers.`);
 
                 const generateWorkerEnv = (wId) => ({
                     WORKER_ID: String(wId),
@@ -258,7 +266,7 @@ export class CoCreateServer extends EventEmitter {
                     const worker = cluster.fork(generateWorkerEnv(currentWorkerId));
 
                     worker.on('error', (err) => {
-                        console.error(`[@cocreate/server] [PRIMARY] Error on Worker ${currentWorkerId}:`, err.message);
+                        console.error(`[@cocreate/server] [MASTER] Error on Worker ${currentWorkerId}:`, err.message);
                     });
 
                     activeWorkers.set(currentWorkerId, {
@@ -270,7 +278,7 @@ export class CoCreateServer extends EventEmitter {
                 }
 
                 cluster.on('exit', async (worker, code, signal) => {
-                    console.log(`[@cocreate/server] [PRIMARY] Worker ${worker.process.pid} exited (Code: ${code}, Signal: ${signal})`);
+                    console.log(`[@cocreate/server] [MASTER] Worker ${worker.process.pid} exited (Code: ${code}, Signal: ${signal})`);
                     
                     let deadWorkerId = null;
                     for (let [id, w] of activeWorkers.entries()) {
@@ -280,7 +288,7 @@ export class CoCreateServer extends EventEmitter {
                             break;
                         }
                     }
-                    this.evaluatePrimaryFallback();
+                    this.evaluateMasterFallback();
                     
                     if (deadWorkerId) {
                         await this.crud.send(this.getServerObject({
@@ -292,15 +300,15 @@ export class CoCreateServer extends EventEmitter {
                                 isDraining: false
                             }
                         }));
-                        console.log(`[@cocreate/server] [PRIMARY] Reset worker${deadWorkerId} state in DB to stopped`);
+                        console.log(`[@cocreate/server] [MASTER] Reset worker${deadWorkerId} state in DB to stopped`);
                     }
 
                     if (this.state.isShuttingDown || this.state.isDraining) {
-                        console.log(`[@cocreate/server] [PRIMARY] Worker ${worker.process.pid} removed. Active workers remaining: ${activeWorkers.size}`);
+                        console.log(`[@cocreate/server] [MASTER] Worker ${worker.process.pid} removed. Active workers remaining: ${activeWorkers.size}`);
                         
                         if (activeWorkers.size === 0) {
-                            console.log("[@cocreate/server] [PRIMARY] All workers successfully drained.");
-                            if (this.state.primaryShutdownTimeout) clearTimeout(this.state.primaryShutdownTimeout);
+                            console.log("[@cocreate/server] [MASTER] All workers successfully drained.");
+                            if (this.state.masterShutdownTimeout) clearTimeout(this.state.masterShutdownTimeout);
                             if (typeof this.state.shutdownCompletionCallback === 'function') {
                                 this.state.shutdownCompletionCallback();
                             } else {
@@ -313,11 +321,11 @@ export class CoCreateServer extends EventEmitter {
                     const targetId = deadWorkerId || (activeWorkers.size + 1);
                     
                     setTimeout(() => {
-                        console.log(`[@cocreate/server] [PRIMARY] Respawning Worker ${targetId}...`);
+                        console.log(`[@cocreate/server] [MASTER] Respawning Worker ${targetId}...`);
                         const newWorker = cluster.fork(generateWorkerEnv(targetId));
 
                         newWorker.on('error', (err) => {
-                            console.error(`[@cocreate/server] [PRIMARY] Error on replacement Worker ${targetId}:`, err.message);
+                            console.error(`[@cocreate/server] [MASTER] Error on replacement Worker ${targetId}:`, err.message);
                         });
 
                         activeWorkers.set(targetId, {
@@ -333,9 +341,8 @@ export class CoCreateServer extends EventEmitter {
             }
         }
 
-        // Initialize worker services if process is a worker or if primary is running with <= 1 worker
-        if (!this.isPrimary || this.totalWorkers <= 1) {
-            if (!this.isPrimary) {
+        if (!this.isMaster || this.totalWorkers <= 1) {
+            if (!this.isMaster) {
                 console.log(`[@cocreate/server] [WORKER ${this.workerId}] running with PID: ${process.pid} (Server ID: ${this.id})`);
             }
 

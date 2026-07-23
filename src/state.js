@@ -23,8 +23,8 @@ import { exec } from 'node:child_process';
  * system signal handling, and synchronizing state to the database and mesh network.
  */
 export class StateManager {
-    constructor(serverCtx) {
-        this.server = serverCtx;
+    constructor(Server) {
+        this.server = Server;
 
         // Top-level status reflects OS/VM status: RUNNING, REBOOTING, STOPPED
         this.server.state = {
@@ -53,10 +53,10 @@ export class StateManager {
     }
 
     setupSignalHandlers() {
-        if (this.server.isPrimary) {
+        if (this.server.isMaster) {
             ['SIGINT', 'SIGTERM', 'SIGBREAK'].forEach((signal) => {
                 process.on(signal, () => {
-                    console.log(`\n[@cocreate/server] [PRIMARY] Received ${signal}. Orchestrating graceful shutdown...`);
+                    console.log(`\n[@cocreate/server] [MASTER] Received ${signal}. Orchestrating graceful shutdown...`);
                     this.triggerGlobalShutdown(signal);
                 });
             });
@@ -95,11 +95,11 @@ export class StateManager {
     }
 
     async publishState(overrideStatus) {
-        if (this.server.isPrimary) {
+        if (this.server.isMaster) {
             const masterStatus = overrideStatus || (this.server.state.isShuttingDown ? 'stopped' : 'running');
             const isMasterStopped = masterStatus === 'stopped';
 
-            const payload = this.getServerObject({
+            const payloadData = {
                 ip: this.server.ip,
                 host: this.server.host,
                 status: this.server.state.status.toLowerCase(), // OS level status: 'running', 'rebooting', 'stopped'
@@ -112,11 +112,30 @@ export class StateManager {
                     pid: process.pid,
                     status: masterStatus
                 }
-            });
+            };
+
+            // If running in single-process mode, also record worker1 state in DB
+            if (this.server.totalWorkers <= 1) {
+                payloadData.worker1 = isMasterStopped ? {
+                    pid: null,
+                    status: 'stopped',
+                    isCordoned: false,
+                    isShedding: false,
+                    isDraining: false
+                } : {
+                    pid: process.pid,
+                    status: masterStatus,
+                    isCordoned: this.server.state.isCordon,
+                    isShedding: this.server.state.isShedding,
+                    isDraining: this.server.state.isDraining
+                };
+            }
+
+            const payload = this.getServerObject(payloadData);
 
             if (this.server.crud) {
                 await this.server.crud.send(payload);
-                console.log(`[@cocreate/server] [PRIMARY] Published server state (OS status: ${this.server.state.status.toLowerCase()}, master status: ${masterStatus}) to DB`);
+                console.log(`[@cocreate/server] [MASTER] Published server state (OS status: ${this.server.state.status.toLowerCase()}, master status: ${masterStatus}) to DB`);
             }
         } else {
             const dbStatus = overrideStatus || (this.server.state.isShuttingDown ? 'stopped' : 'running');
@@ -157,24 +176,24 @@ export class StateManager {
         if (this.server.state.isCordon === isCordon) return;
         this.server.state.isCordon = isCordon;
 
-        if (!this.server.isPrimary) {
+        if (!this.server.isMaster) {
             if (isCordon) {
                 this.server.closeEdgeListeners();
             } else {
                 this.server.restoreEdgeListeners();
             }
-            if (process.send) {
-                process.send({ type: 'worker_state_change', isCordoned: isCordon });
+            if (this.server.send) {
+                this.server.send({ method: 'worker_state_change', isCordoned: isCordon });
             }
         } else {
-            this.server.evaluatePrimaryFallback();
+            this.server.evaluateMasterFallback();
         }
 
-        if (this.server.isPrimary && !internalCall) {
+        if (this.server.isMaster && !internalCall) {
             await this.publishState();
         }
         
-        const processLabel = this.server.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.server.workerId})`;
+        const processLabel = this.server.isMaster ? `Master (${process.pid})` : `Worker ${process.pid} (ID: ${this.server.workerId})`;
         console.log(`[@cocreate/server] ${processLabel} isCordon updated to: ${this.server.state.isCordon}`);
     }
 
@@ -205,7 +224,7 @@ export class StateManager {
 
         if (isShedding) {
             await this.cordon(true, true);
-            if (!this.server.isPrimary && organizations.length > 0 && this.server.wsManager) {
+            if (!this.server.isMaster && organizations.length > 0 && this.server.wsManager) {
                 console.log(`[@cocreate/server] Selective eviction of org IDs:`, organizations);
                 this.server.wsManager.destroyOrganizations(organizations);
             }
@@ -213,15 +232,15 @@ export class StateManager {
             await this.cordon(false, true);
         }
 
-        if (!this.server.isPrimary && process.send) {
-            process.send({ type: 'worker_state_change', isShedding: this.server.state.isShedding });
+        if (!this.server.isMaster && this.server.send) {
+            this.server.send({ method: 'worker_state_change', isShedding: this.server.state.isShedding });
         }
 
-        if (this.server.isPrimary && !internalCall) {
+        if (this.server.isMaster && !internalCall) {
             await this.publishState();
         }
 
-        const processLabel = this.server.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.server.workerId})`;
+        const processLabel = this.server.isMaster ? `Master (${process.pid})` : `Worker ${process.pid} (ID: ${this.server.workerId})`;
         console.log(`[@cocreate/server] ${processLabel} isShedding updated to: ${this.server.state.isShedding}`);
     }
 
@@ -240,7 +259,7 @@ export class StateManager {
 
         if (isDraining) {
             await this.cordon(true, true);
-            if (!this.server.isPrimary && this.server.wsManager) {
+            if (!this.server.isMaster && this.server.wsManager) {
                 console.log(`[@cocreate/server] Worker drain triggered. Purging websocket connections.`);
                 this.server.wsManager.destroyAll();
             }
@@ -248,15 +267,15 @@ export class StateManager {
             await this.cordon(false, true);
         }
 
-        if (!this.server.isPrimary && process.send) {
-            process.send({ type: 'worker_state_change', isDraining: this.server.state.isDraining });
+        if (!this.server.isMaster && this.server.send) {
+            this.server.send({ method: 'worker_state_change', isDraining: this.server.state.isDraining });
         }
 
-        if (this.server.isPrimary && !internalCall) {
+        if (this.server.isMaster && !internalCall) {
             await this.publishState();
         }
 
-        const processLabel = this.server.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${this.server.workerId})`;
+        const processLabel = this.server.isMaster ? `Master (${process.pid})` : `Worker ${process.pid} (ID: ${this.server.workerId})`;
         console.log(`[@cocreate/server] ${processLabel} isDraining updated to: ${this.server.state.isDraining}`);
     }
 
@@ -268,13 +287,13 @@ export class StateManager {
             return;
         }
 
-        if (this.server.isPrimary) {
-            if (payload && (payload.isPrimary || payload.master)) {
-                console.log(`[@cocreate/server] [PRIMARY] App restart commanded. Triggering global graceful shutdown...`);
+        if (this.server.isMaster) {
+            if (payload && (payload.isMaster || payload.master)) {
+                console.log(`[@cocreate/server] [MASTER] App restart commanded. Triggering global graceful shutdown...`);
                 this.triggerGlobalShutdown('API_RESTART');
             }
         } else {
-            if (payload && (payload.isPrimary || payload.master)) return;
+            if (payload && (payload.isMaster || payload.master)) return;
 
             console.log(`[@cocreate/server] [WORKER ${this.server.workerId}] Restart triggered. Commencing drain...`);
             await this.publishState('restarting');
@@ -288,14 +307,14 @@ export class StateManager {
         if (!fromEvent) {
             const sendPayload = (payload && typeof payload === 'object') ? payload : {};
             sendPayload.method = 'reboot';
-            if (!this.server.isPrimary) sendPayload.master = true;
+            if (!this.server.isMaster) sendPayload.master = true;
             if (this.server.send) this.server.send(sendPayload);
             return;
         }
 
-        if (!this.server.isPrimary) return;
+        if (!this.server.isMaster) return;
 
-        console.log(`[@cocreate/server] [PRIMARY] OS Reboot requested. Commencing graceful shutdown before kernel reboot...`);
+        console.log(`[@cocreate/server] [MASTER] OS Reboot requested. Commencing graceful shutdown before kernel reboot...`);
         this.server.state.status = 'REBOOTING';
         
         if (this.server.mesh) {
@@ -304,7 +323,7 @@ export class StateManager {
         this.publishState();
 
         this.triggerGlobalShutdown('OS_REBOOT', () => {
-            console.log(`[@cocreate/server] [PRIMARY] Executing OS Reboot: sudo reboot`);
+            console.log(`[@cocreate/server] [MASTER] Executing OS Reboot: sudo reboot`);
             exec('sudo reboot', (err) => {
                 if (err) {
                     console.error("[@cocreate/server] Failed to execute sudo reboot:", err.message);
@@ -318,18 +337,18 @@ export class StateManager {
         if (!fromEvent) {
             const sendPayload = (payload && typeof payload === 'object') ? payload : {};
             sendPayload.method = 'shutdown';
-            if (!this.server.isPrimary) sendPayload.master = true;
+            if (!this.server.isMaster) sendPayload.master = true;
             if (this.server.send) this.server.send(sendPayload);
             return;
         }
 
-        if (!this.server.isPrimary) return;
+        if (!this.server.isMaster) return;
 
-        console.log(`[@cocreate/server] [PRIMARY] OS Shutdown requested. Commencing graceful shutdown before VM poweroff...`);
+        console.log(`[@cocreate/server] [MASTER] OS Shutdown requested. Commencing graceful shutdown before VM poweroff...`);
         this.server.state.status = 'STOPPED';
 
         this.triggerGlobalShutdown('OS_SHUTDOWN', () => {
-            console.log(`[@cocreate/server] [PRIMARY] Executing OS Poweroff: sudo poweroff`);
+            console.log(`[@cocreate/server] [MASTER] Executing OS Poweroff: sudo poweroff`);
             exec('sudo poweroff', (err) => {
                 if (err) {
                     console.error("[@cocreate/server] Failed to execute sudo poweroff:", err.message);
@@ -340,9 +359,9 @@ export class StateManager {
     }
 
     async triggerGlobalShutdown(reason, completionCallback) {
-        if (!this.server.isPrimary || this.server.state.isShuttingDown) return;
+        if (!this.server.isMaster || this.server.state.isShuttingDown) return;
 
-        console.log(`\n[@cocreate/server] [PRIMARY] Commencing Global Shutdown Sequence (Reason: ${reason})...`);
+        console.log(`\n[@cocreate/server] [MASTER] Commencing Global Shutdown Sequence (Reason: ${reason})...`);
         
         this.server.state.isShuttingDown = true;
         this.server.state.shutdownCompletionCallback = completionCallback;
@@ -374,7 +393,7 @@ export class StateManager {
                     this.server.mesh.close();
                 }
                 this.server.state.isMeshClosed = true;
-                console.log("[@cocreate/server] [PRIMARY] Mesh closed successfully.");
+                console.log("[@cocreate/server] [MASTER] Mesh closed successfully.");
             }, 1500);
         }
 
@@ -391,7 +410,7 @@ export class StateManager {
 
         // Step 3: Safety timeout
         this.server.state.primaryShutdownTimeout = setTimeout(async () => {
-            console.error("[@cocreate/server] [PRIMARY] Shutdown Timeout exceeded (15s). Forcing process exit.");
+            console.error("[@cocreate/server] [MASTER] Shutdown Timeout exceeded (15s). Forcing process exit.");
             await finalizeShutdown();
             if (typeof completionCallback === 'function') completionCallback();
             else process.exit(1);
@@ -399,11 +418,11 @@ export class StateManager {
 
         // Step 4: Command worker processes to shut down
         if (this.server.send) {
-            this.server.send({ type: 'shutdown', method: 'shutdown', broadcast: true });
+            this.server.send({ method: 'shutdown', broadcast: true });
         }
         
         if (this.server.workers && this.server.workers.size === 0) {
-            console.log("[@cocreate/server] [PRIMARY] No active workers detected. Concluding shutdown.");
+            console.log("[@cocreate/server] [MASTER] No active workers detected. Concluding shutdown.");
             await finalizeShutdown();
             if (typeof completionCallback === 'function') setTimeout(completionCallback, 1000);
             else setTimeout(() => process.exit(0), 1000);
@@ -412,7 +431,7 @@ export class StateManager {
 }
 
 export default {
-    init(serverCtx) {
-        return new StateManager(serverCtx);
+    init(Server) {
+        return new StateManager(Server);
     }
 };
