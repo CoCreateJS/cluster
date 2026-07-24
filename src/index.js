@@ -36,10 +36,9 @@ import LazyLoader from '@cocreate/lazy-loader';
 import FileServer from '@cocreate/file-server';
 import ApiServer from '@cocreate/api';
 
-import { ObjectId } from '@cocreate/utils';
+import { ObjectId, getClientInfo } from '@cocreate/utils';
 
 import resolveInfrastructure from './getInfrastructure.js';
-import getIP from './getIp.js';
 import IPC from './ipc.js';
 import Storage from './storage.js';
 import State from './state.js';
@@ -213,7 +212,7 @@ export class CoCreateServer extends EventEmitter {
 
         if (this.isMaster) {
             console.log(`[@cocreate/server] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);            
-            this.ip = await getIP();
+            this.ip = (await getClientInfo()).ip;
             this.infrastructure = await resolveInfrastructure(this.id);
             await this.mesh.init(this);
             await this.autoscaler.init(this);
@@ -347,7 +346,7 @@ export class CoCreateServer extends EventEmitter {
             this.telemetry = await ServerTelemetry.init(this);
 
             if (!this.ip) {
-                this.ip = process.env.SERVER_IP || await getIP();
+                this.ip = process.env.SERVER_IP || (await getClientInfo()).ip;
             }
 
             if (!this.infrastructure) {
