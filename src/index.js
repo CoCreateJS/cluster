@@ -220,7 +220,6 @@ export class CoCreateServer extends EventEmitter {
 
             // Reset logs array for a fresh logging session on master startup
             await this.crud.send(this.getServerObject({ logs: [] }));
-            console.log(`[@cocreate/server] [MASTER] Cleared previous server logs (logs: []) for new session.`);
 
             // Register initial running profile to DB for Master
             await this.publishState();
@@ -239,7 +238,6 @@ export class CoCreateServer extends EventEmitter {
                 }
 
                 await this.crud.send(this.getServerObject(initialWorkerStates));
-                console.log(`[@cocreate/server] [MASTER] Initialized ${this.totalWorkers} worker state slots in DB`);
             }
 
             // Route mesh commands to IPC

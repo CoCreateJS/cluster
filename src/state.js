@@ -135,7 +135,6 @@ export class StateManager {
 
             if (this.server.crud) {
                 await this.server.crud.send(payload);
-                console.log(`[@cocreate/server] [MASTER] Published server state (OS status: ${this.server.state.status.toLowerCase()}, master status: ${masterStatus}) to DB`);
             }
         } else {
             const dbStatus = overrideStatus || (this.server.state.isShuttingDown ? 'stopped' : 'running');
@@ -159,7 +158,6 @@ export class StateManager {
 
             if (this.server.crud) {
                 await this.server.crud.send(payload);
-                console.log(`[@cocreate/server] [WORKER ${this.server.workerId}] Published worker state '${dbStatus}' to DB`);
             }
         }
     }
