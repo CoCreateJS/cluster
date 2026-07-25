@@ -89,15 +89,8 @@ export class CoCreateServer extends EventEmitter {
                 return this.handleEdgeRequest(req, res);
             }
             
+            // 2. Force a 301 redirect to HTTPS for all other traffic
             const host = req.headers.host ? req.headers.host.split(':')[0] : 'localhost';
-
-            // 2. Intercept with a 307 Temporary Redirect if cordon is active
-            if (this.state.isCordon) {
-                res.writeHead(307, { "Location": `https://${host}${requestUrl}` });
-                return res.end();
-            }
-
-            // 3. Force a 301 redirect to HTTPS for all other traffic
             res.writeHead(301, { "Location": `https://${host}${requestUrl}` });
             res.end();
         });
@@ -133,20 +126,21 @@ export class CoCreateServer extends EventEmitter {
                 const HTTPS_PORT = process.env.HTTPS_PORT || 443;
                 const BIND_IP = process.env.BIND_IP || '0.0.0.0';
 
-                const handleRedirect = (req, res) => {
-                    const host = req.headers.host ? req.headers.host.split(':')[0] : 'localhost';
-                    res.writeHead(307, { "Location": `https://${host}${req.url || '/'}`, "Retry-After": "5" });
-                    res.end();
+                const handleFallback = (req, res) => {
+                    res.writeHead(503, { 
+                        "Content-Type": "text/plain",
+                        "Retry-After": "5"
+                    });
+                    res.end("Service Unavailable: All workers cordoned or inactive");
                 };
-
-                this.fallbackHttpServer = Http.createServer(handleRedirect);
+                this.fallbackHttpServer = Http.createServer(handleFallback);
                 this.fallbackHttpServer.listen(HTTP_PORT, BIND_IP);
 
                 if (this.httpsOptions) {
-                    this.fallbackHttpsServer = Https.createServer(this.httpsOptions, handleRedirect);
+                    this.fallbackHttpsServer = Https.createServer(this.httpsOptions, handleFallback);
                     this.fallbackHttpsServer.listen(HTTPS_PORT, BIND_IP);
                 }
-                console.log(`[@cocreate/server] [MASTER] All workers cordoned/down. 307 Redirect Fallback active on ${BIND_IP}.`);
+                console.log(`[@cocreate/server] [MASTER] All workers cordoned/down.`);
             }
         } else {
             if (this.fallbackHttpServer) {
@@ -156,7 +150,7 @@ export class CoCreateServer extends EventEmitter {
                     this.fallbackHttpsServer.close();
                     this.fallbackHttpsServer = null;
                 }
-                console.log(`[@cocreate/server] [MASTER] Workers active. 307 Redirect Fallback disabled.`);
+                console.log(`[@cocreate/server] [MASTER] Workers active.`);
             }
         }
     }
