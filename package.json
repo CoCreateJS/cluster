@@ -44,6 +44,20 @@
   "type": "module",
   "main": "./src/index.js",
   "dependencies": {
-    "@cocreate/acme": "^1.4.0"
+    "@cocreate/acme": "^1.5.2",
+    "@cocreate/authenticate": "^1.12.3",
+    "@cocreate/authorize": "^1.17.4",
+    "@cocreate/config": "^1.14.3",
+    "@cocreate/cron-jobs": "^1.4.4",
+    "@cocreate/crud-server": "^1.37.4",
+    "@cocreate/file-server": "^1.21.4",
+    "@cocreate/lazy-loader": "^1.24.3",
+    "@cocreate/server": "^1.6.2",
+    "@cocreate/server-autoscaler": "^1.0.3",
+    "@cocreate/server-mesh": "^1.2.2",
+    "@cocreate/server-telemetry": "^1.16.2",
+    "@cocreate/socket-server": "^1.33.3",
+    "@cocreate/usage": "^1.4.2",
+    "@cocreate/utils": "^1.44.3"
   }
 }
