@@ -105,6 +105,7 @@ export class StateManager {
                 status: this.server.state.status.toLowerCase(), // OS level status: 'running', 'rebooting', 'stopped'
                 totalWorkers: this.server.totalWorkers,
                 infrastructure: this.server.infrastructure,
+                location: this.server.location,
                 master: isMasterStopped ? {
                     pid: null,
                     status: 'stopped'

@@ -38,7 +38,7 @@ import ApiServer from '@cocreate/api';
 
 import { ObjectId, getClientInfo } from '@cocreate/utils';
 
-import resolveInfrastructure from './getInfrastructure.js';
+import getInfrastructure from './getInfrastructure.js';
 import IPC from './ipc.js';
 import Storage from './storage.js';
 import State from './state.js';
@@ -212,8 +212,9 @@ export class CoCreateServer extends EventEmitter {
 
         if (this.isMaster) {
             console.log(`[@cocreate/server] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);            
-            this.ip = (await getClientInfo()).ip;
-            this.infrastructure = await resolveInfrastructure(this.id);
+            this.location = await getClientInfo()
+            this.ip = this.location.ip;
+            this.infrastructure = await getInfrastructure(this.id);
             await this.mesh.init(this);
             await this.autoscaler.init(this);
 
@@ -255,7 +256,8 @@ export class CoCreateServer extends EventEmitter {
                     WORKER_ID: String(wId),
                     SERVER_ID: String(this.id || ''),
                     SERVER_IP: String(this.ip || '127.0.0.1'),
-                    SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure || {})
+                    SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure || {}),
+                    SERVER_LOCATION: JSON.stringify(this.location || {})
                 });
 
                 for (let i = 0; i < this.totalWorkers; i++) {
@@ -353,9 +355,19 @@ export class CoCreateServer extends EventEmitter {
                 try {
                     this.infrastructure = process.env.SERVER_INFRASTRUCTURE 
                         ? JSON.parse(process.env.SERVER_INFRASTRUCTURE) 
-                        : await resolveInfrastructure(this.id);
+                        : await getInfrastructure(this.id);
                 } catch (error) {
-                    this.infrastructure = await resolveInfrastructure(this.id);
+                    this.infrastructure = await getInfrastructure(this.id);
+                }
+            }
+
+            if (!this.location) {
+                try {
+                    this.location = process.env.SERVER_LOCATION
+                        ? JSON.parse(process.env.SERVER_LOCATION) 
+                        : await getClientInfo(this.id);
+                } catch (error) {
+                    this.location = await getClientInfo(this.id);
                 }
             }
 
