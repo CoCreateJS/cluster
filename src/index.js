@@ -80,21 +80,6 @@ export class CoCreateServer extends EventEmitter {
         // Attach Log Manager module
         this.logManager = LogManager.init(this);
 
-        // Master unencrypted HTTP edge listener for ACME and redirect handling
-        this.http = Http.createServer((req, res) => {
-            const requestUrl = req.url || '/';
-            
-            // 1. Allow ACME challenges to pass through over unencrypted HTTP
-            if (requestUrl.startsWith('/.well-known/acme-challenge/')) {
-                return this.handleEdgeRequest(req, res);
-            }
-            
-            // 2. Force a 301 redirect to HTTPS for all other traffic
-            const host = req.headers.host ? req.headers.host.split(':')[0] : 'localhost';
-            res.writeHead(301, { "Location": `https://${host}${requestUrl}` });
-            res.end();
-        });
-
         this.authenticate = authenticate;
         this.authorize = authorize;
     }
@@ -121,7 +106,7 @@ export class CoCreateServer extends EventEmitter {
         const allWorkersDown = Array.from(this.workers.values()).every(w => w.isListening === false);
 
         if (allWorkersDown) {
-            if (!this.fallbackHttpServer) {
+            if (!this.fallbackHttpServer && !this.state.isCordon) {
                 const HTTP_PORT = process.env.HTTP_PORT || 80;
                 const HTTPS_PORT = process.env.HTTPS_PORT || 443;
                 const BIND_IP = process.env.BIND_IP || '0.0.0.0';
@@ -163,7 +148,7 @@ export class CoCreateServer extends EventEmitter {
         this.isInitialized = true;
         this.send = IPC.init(this, pendingPromises);
 
-        const config = await Config.request({
+        const config = await Config.prompt({
             'organization_id': '',
             'host': '',
             'workers': '',
@@ -178,10 +163,10 @@ export class CoCreateServer extends EventEmitter {
                 this.id = config.server_id;
             } else {
                 this.id = process.env.SERVER_ID || ObjectId().toString();
-                await Config.request({ server_id: { value: this.id } });
+                await Config.prompt({ server_id: { value: this.id } });
                 console.log(`[@cocreate/server] [MASTER] Generated & persisted new Server ID: ${this.id}`);
             }
-            process.env.SERVER_ID = this.id;
+            process.env.SERVER_ID = this.id || "";
         } else {
             this.id = process.env.SERVER_ID;
         }
@@ -370,6 +355,20 @@ export class CoCreateServer extends EventEmitter {
                 SNICallback: (domain, cb) => this.certificate.sniCallback(domain, cb)
             };
             this.https = Https.createServer(this.httpsOptions, (req, res) => this.handleEdgeRequest(req, res));
+                        this.http = Http.createServer((req, res) => {
+                const requestUrl = req.url || '/';
+                
+                // 1. Allow ACME challenges to pass through over unencrypted HTTP
+                if (requestUrl.startsWith('/.well-known/acme-challenge/')) {
+                    return this.handleEdgeRequest(req, res);
+                }
+                
+                // 2. Force a 301 redirect to HTTPS for all other traffic
+                const host = req.headers.host ? req.headers.host.split(':')[0] : 'localhost';
+                res.writeHead(301, { "Location": `https://${host}${requestUrl}` });
+                res.end();
+            });
+
             await this.certificate.init(this);
 
             this.wsManager = new SocketServer(this);
