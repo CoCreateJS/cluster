@@ -192,7 +192,7 @@ export class StateManager {
             await this.publishState();
         }
         
-        const processLabel = this.server.isMaster ? `Master (${process.pid})` : `Worker ${process.pid} (ID: ${this.server.workerId})`;
+        const processLabel = this.server.isMaster ? `[MASTER] (${process.pid})` : `[WORKER] ${process.pid} (ID: ${this.server.workerId})`;
         console.log(`[@cocreate/server] ${processLabel} isCordon updated to: ${this.server.state.isCordon}`);
     }
 
