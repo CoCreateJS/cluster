@@ -52,7 +52,7 @@
     "@cocreate/crud-server": "^1.37.4",
     "@cocreate/file-server": "^1.21.4",
     "@cocreate/lazy-loader": "^1.24.3",
-    "@cocreate/server": "^1.6.2",
+    "@cocreate/server": "^1.6.3",
     "@cocreate/server-autoscaler": "^1.0.3",
     "@cocreate/server-mesh": "^1.2.2",
     "@cocreate/server-telemetry": "^1.16.2",
