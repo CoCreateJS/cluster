@@ -1,6 +1,6 @@
 {
   "name": "@cocreate/server",
-  "version": "1.6.3",
+  "version": "1.7.0",
   "description": "A secure, stateless, clustered headless server built for high-performance multi-tenancy, real-time collaboration, and sandboxed AST execution.",
   "keywords": [
     "stateless-server",
