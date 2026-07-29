@@ -278,7 +278,6 @@ export class CoCreateServer extends EventEmitter {
                                 isDraining: false
                             }
                         }));
-                        console.log(`[@cocreate/server] [MASTER] Reset worker${deadWorkerId} state in DB to stopped`);
                     }
 
                     if (this.state.isShuttingDown || this.state.isDraining) {
