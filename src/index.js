@@ -43,6 +43,7 @@ import IPC from './ipc.js';
 import Storage from './storage.js';
 import State from './state.js';
 import LogManager from './log.js';
+import TLS from './tls.js';
 
 const isMaster = cluster.isMaster;
 
@@ -69,12 +70,18 @@ export class CoCreateServer extends EventEmitter {
         this.totalWorkers = 0;
         this.isInitialized = false;
 
+        // Shared ACME Certificate Manager instance
+        this.certificate = Acme;
+
+        // Attach TLS Manager module
+        this.tls = TLS.init(this);
+
         // Initialize reactive cluster storage
         this.storage = new Storage(this, pendingPromises);
         this.store = this.storage;
         this.workerStorage = this.storage;
 
-        // Attach State Manager module (attaches cordon, shed, drain, publishState, process signals)
+        // Attach State Manager module
         State.init(this);
 
         // Attach Log Manager module
@@ -112,20 +119,22 @@ export class CoCreateServer extends EventEmitter {
                 const BIND_IP = process.env.BIND_IP || '0.0.0.0';
 
                 const handleFallback = (req, res) => {
-                    res.writeHead(503, { 
+                    res.writeHead(500, { 
                         "Content-Type": "text/plain",
                         "Retry-After": "5"
                     });
                     res.end("Service Unavailable: All workers cordoned or inactive");
                 };
+                
                 this.fallbackHttpServer = Http.createServer(handleFallback);
                 this.fallbackHttpServer.listen(HTTP_PORT, BIND_IP);
 
-                if (this.httpsOptions) {
-                    this.fallbackHttpsServer = Https.createServer(this.httpsOptions, handleFallback);
-                    this.fallbackHttpsServer.listen(HTTPS_PORT, BIND_IP);
-                }
-                console.log(`[@cocreate/server] [MASTER] All workers cordoned/down.`);
+                // Create HTTPS options on-demand via TLS module for Master fallback
+                const httpsOptions = this.tls.createHttpsOptions();
+                this.fallbackHttpsServer = Https.createServer(httpsOptions, handleFallback);
+                this.fallbackHttpsServer.listen(HTTPS_PORT, BIND_IP);
+                
+                console.log(`[@cocreate/server] [MASTER] All workers cordoned/down. Master fallback active (500 mode).`);
             }
         } else {
             if (this.fallbackHttpServer) {
@@ -135,7 +144,7 @@ export class CoCreateServer extends EventEmitter {
                     this.fallbackHttpsServer.close();
                     this.fallbackHttpsServer = null;
                 }
-                console.log(`[@cocreate/server] [MASTER] Workers active.`);
+                console.log(`[@cocreate/server] [MASTER] Workers active. Deactivating Master fallback.`);
             }
         }
     }
@@ -191,7 +200,7 @@ export class CoCreateServer extends EventEmitter {
 
         if (this.isMaster) {
             console.log(`[@cocreate/server] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);            
-            this.location = await getClientInfo()
+            this.location = await getClientInfo();
             this.ip = this.location.ip;
             this.infrastructure = await getInfrastructure(this.id);
             await this.mesh.init(this);
@@ -349,12 +358,17 @@ export class CoCreateServer extends EventEmitter {
                 }
             }
 
-            this.certificate = Acme;
-            this.httpsOptions = {
-                SNICallback: (domain, cb) => this.certificate.sniCallback(domain, cb)
-            };
-            this.https = Https.createServer(this.httpsOptions, (req, res) => this.handleEdgeRequest(req, res));
-                        this.http = Http.createServer((req, res) => {
+            await this.certificate.init(this);
+
+            // Create TLS options locally via TLS module for worker HTTPS server instance
+            const httpsOptions = this.tls.createHttpsOptions();
+            this.https = Https.createServer(httpsOptions, (req, res) => this.handleEdgeRequest(req, res));
+            
+            const HTTP_PORT = process.env.HTTP_PORT || 80;
+            const HTTPS_PORT = process.env.HTTPS_PORT || 443;
+            const BIND_IP = process.env.BIND_IP || '0.0.0.0';
+
+            this.http = Http.createServer((req, res) => {
                 const requestUrl = req.url || '/';
                 
                 // 1. Allow ACME challenges to pass through over unencrypted HTTP
@@ -362,22 +376,19 @@ export class CoCreateServer extends EventEmitter {
                     return this.handleEdgeRequest(req, res);
                 }
                 
-                // 2. Force a 301 redirect to HTTPS for all other traffic
-                const host = req.headers.host ? req.headers.host.split(':')[0] : 'localhost';
-                res.writeHead(301, { "Location": `https://${host}${requestUrl}` });
+                // 2. Force a 301 redirect to HTTPS for all traffic (preserving non-standard ports)
+                const rawHost = req.headers.host || 'localhost';
+                const host = rawHost.split(':')[0];
+                const portSuffix = (HTTPS_PORT && String(HTTPS_PORT) !== '443') ? `:${HTTPS_PORT}` : '';
+                
+                res.writeHead(301, { "Location": `https://${host}${portSuffix}${requestUrl}` });
                 res.end();
             });
-
-            await this.certificate.init(this);
 
             this.wsManager = new SocketServer(this);
             this.api = await ApiServer.init(this);
             this.files = FileServer.init(this);
             this.loader = await LazyLoader.init(this);
-
-            const HTTP_PORT = process.env.HTTP_PORT || 80;
-            const HTTPS_PORT = process.env.HTTPS_PORT || 443;
-            const BIND_IP = process.env.BIND_IP || '0.0.0.0';
 
             const reportListening = (state) => {
                 if (process.connected) {
