@@ -49,7 +49,7 @@
     "@cocreate/authorize": "^1.17.4",
     "@cocreate/config": "^1.14.3",
     "@cocreate/cron-jobs": "^1.4.4",
-    "@cocreate/crud-server": "^1.37.4",
+    "@cocreate/crud-server": "^1.39.0",
     "@cocreate/file-server": "^1.21.4",
     "@cocreate/lazy-loader": "^1.24.3",
     "@cocreate/server-autoscaler": "^1.0.3",
