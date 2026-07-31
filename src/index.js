@@ -22,7 +22,7 @@ import Https from 'node:https';
 import cluster from 'node:cluster';
 import os from 'node:os';
 
-import Acme from '@cocreate/acme';
+import Acme from '@cocreate/certificates';
 import ServerMesh from '@cocreate/server-mesh';
 import ServerAutoscaler from '@cocreate/server-autoscaler';
 import ServerTelemetry from '@cocreate/server-telemetry';

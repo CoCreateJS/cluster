@@ -95,7 +95,7 @@ The server composes multiple standalone CoCreate modules into a unified runtime.
 
 | Module | Responsibility |
 | --- | --- |
-| `@cocreate/acme` | TLS certificate management |
+| `@cocreate/certificates` | TLS certificate management |
 | `@cocreate/socket-server` | WebSocket server |
 | `@cocreate/server-mesh` | Cluster communication |
 | `@cocreate/crud-server` | Database routing |
@@ -380,7 +380,7 @@ Once the final client disconnects:
 - Mutual TLS encrypted cluster communication
 - Dedicated internal mesh network
 - Automatic UUID generation for distributed tracing
-- Ephemeral TLS certificates managed by `@cocreate/acme`
+- Ephemeral TLS certificates managed by `@cocreate/certificates`
 
 ---
 

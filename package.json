@@ -44,7 +44,7 @@
   "type": "module",
   "main": "./src/index.js",
   "dependencies": {
-    "@cocreate/acme": "^1.7.0",
+    "@cocreate/certificates": "^1.7.0",
     "@cocreate/authenticate": "^1.15.0",
     "@cocreate/authorize": "^1.19.0",
     "@cocreate/config": "^1.17.0",
