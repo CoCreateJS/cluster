@@ -44,7 +44,7 @@
   "type": "module",
   "main": "./src/index.js",
   "dependencies": {
-    "@cocreate/certificates": "^1.7.0",
+    "@cocreate/certificates": "^1.10.0",
     "@cocreate/authenticate": "^1.15.0",
     "@cocreate/authorize": "^1.19.0",
     "@cocreate/config": "^1.17.0",
@@ -57,6 +57,6 @@
     "@cocreate/server-telemetry": "^1.19.0",
     "@cocreate/socket-server": "^1.35.1",
     "@cocreate/usage": "^1.6.0",
-    "@cocreate/utils": "^1.48.0"
+    "@cocreate/utils": "^1.50.0"
   }
 }
