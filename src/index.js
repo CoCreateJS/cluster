@@ -22,7 +22,7 @@ import Https from 'node:https';
 import cluster from 'node:cluster';
 import os from 'node:os';
 
-import Acme from '@cocreate/certificates';
+import Certificates from '@cocreate/certificates';
 import ServerMesh from '@cocreate/server-mesh';
 import ServerAutoscaler from '@cocreate/server-autoscaler';
 import ServerTelemetry from '@cocreate/server-telemetry';
@@ -52,7 +52,7 @@ const activeWorkers = new Map();
 
 /**
  * CoCreateServer orchestrates cluster process management, socket handling,
- * API endpoint dispatching, SSL certificates, and mesh cluster synchronization.
+ * API endpoint dispatching, SSL certificates with SNI support, and mesh cluster synchronization.
  */
 export class CoCreateServer extends EventEmitter {
     constructor() {
@@ -69,9 +69,6 @@ export class CoCreateServer extends EventEmitter {
         
         this.totalWorkers = 0;
         this.isInitialized = false;
-
-        // Shared ACME Certificate Manager instance
-        this.certificate = Acme;
 
         // Attach TLS Manager module
         this.tls = TLS.init(this);
@@ -107,6 +104,45 @@ export class CoCreateServer extends EventEmitter {
         if (this.https && !this.https.listening) this.https.listen(HTTPS_PORT, BIND_IP);
     }
 
+    /**
+     * Builds HTTPS configuration options specifically for Worker processes with SNI callback support.
+     * Uses default TLS certificates for localhost or loopback requests, and routes
+     * all multi-tenant custom domains through the worker's initialized Certificates module.
+     */
+    getWorkerHttpsOptions() {
+        const baseHttpsOptions = this.tls.createHttpsOptions();
+
+        return {
+            ...baseHttpsOptions,
+            SNICallback: (servername, cb) => {
+                // If request is localhost or IP loopback, use standard default TLS certificates
+                if (!servername || servername === 'localhost' || servername === '127.0.0.1' || servername === '::1') {
+                    return cb(null);
+                }
+
+                // Resolve SNI handler supporting both `sniCallback` and `SNICallback` naming conventions
+                const sniHandler = this.certificates?.sniCallback || this.certificates?.SNICallback;
+
+                // Delegate dynamic multi-tenant domain SSL context lookup asynchronously
+                if (typeof sniHandler === 'function') {
+                    return sniHandler.call(this.certificates, servername, (err, ctx) => {
+                        if (err || !ctx) {
+                            if (err) {
+                                console.warn(`[@cocreate/server] Dynamic SNI lookup failed for domain "${servername}":`, err.message);
+                            }
+                            // Fallback to default TLS certificate if non-localhost domain lookup fails
+                            return cb(null);
+                        }
+                        return cb(null, ctx);
+                    });
+                }
+
+                // Fallback to standard base TLS certificates if no certificate module is initialized
+                return cb(null);
+            }
+        };
+    }
+
     evaluateMasterFallback() {
         if (!this.isMaster) return;
 
@@ -129,7 +165,7 @@ export class CoCreateServer extends EventEmitter {
                 this.fallbackHttpServer = Http.createServer(handleFallback);
                 this.fallbackHttpServer.listen(HTTP_PORT, BIND_IP);
 
-                // Create HTTPS options on-demand via TLS module for Master fallback
+                // Create basic TLS options without SNI lookup overhead for Master fallback mode
                 const httpsOptions = this.tls.createHttpsOptions();
                 this.fallbackHttpsServer = Https.createServer(httpsOptions, handleFallback);
                 this.fallbackHttpsServer.listen(HTTPS_PORT, BIND_IP);
@@ -196,7 +232,6 @@ export class CoCreateServer extends EventEmitter {
 
         this.crud = await CrudServer.init(this);
         this.mesh = ServerMesh;
-        this.autoscaler = ServerAutoscaler;
 
         if (this.isMaster) {
             console.log(`[@cocreate/server] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);            
@@ -204,7 +239,7 @@ export class CoCreateServer extends EventEmitter {
             this.ip = this.location.ip;
             this.infrastructure = await getInfrastructure(this.id);
             await this.mesh.init(this);
-            await this.autoscaler.init(this);
+            this.autoscaler = await ServerAutoscaler.init(this);
 
             // Reset logs array for a fresh logging session on master startup
             await this.crud.send(this.getServerObject({ logs: [] }));
@@ -358,10 +393,11 @@ export class CoCreateServer extends EventEmitter {
                 }
             }
 
-            await this.certificate.init(this);
+            // Initialize certificates module on worker
+            this.certificates = await Certificates.init(this);
 
-            // Create TLS options locally via TLS module for worker HTTPS server instance
-            const httpsOptions = this.tls.createHttpsOptions();
+            // Create HTTPS options with dynamic SNICallback for multi-tenant domains
+            const httpsOptions = this.getWorkerHttpsOptions();
             this.https = Https.createServer(httpsOptions, (req, res) => this.handleEdgeRequest(req, res));
             
             const HTTP_PORT = process.env.HTTP_PORT || 80;
