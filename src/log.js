@@ -1,5 +1,5 @@
 /********************************************************************************
- * Copyright (C) 2023 CoCreate and Contributors.
+ * Copyright (C) 2026 CoCreate and Contributors.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published
@@ -17,191 +17,260 @@
  ********************************************************************************/
 
 import util from 'node:util';
+import config from '@cocreate/config';
+import { dotNotationToObject } from '@cocreate/utils';
+
+let server = null;
+let logQueue = [];
+let recentLogs = [];
+let isLoggingInternal = false; // Recursion guard against infinite loops
+let flushTimer = null;
+
+let logConfig = {
+    maxLogs: 100, // Capped ring buffer size on server document
+    flushIntervalMs: 1500, // Time-window flush in milliseconds
+    maxBatchSize: 20 // Trigger immediate flush if queue exceeds size
+};
+
+// Preserve native console methods for uninhibited terminal stdout/stderr
+const originalConsole = {
+    log: console.log.bind(console),
+    info: console.info.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console)
+};
 
 /**
- * LogManager captures console logs and manual server log dispatches across
- * cluster workers, aggregates them on the master orchestrator, and periodically
- * flushes a capped ring buffer of logs to the server object in the database.
+ * Loads system configuration using @cocreate/config and queries database overrides
+ * for 'logManager' or 'logger' configurations.
+ * 
+ * @returns {Promise<Object>} Resolved logging configuration object
  */
-export class LogManager {
-    constructor(Server) {
-        this.server = Server;
-        this.logQueue = [];
-        this.recentLogs = [];
-        this.maxLogs = 100; // Capped ring buffer size on server document
-        this.flushIntervalMs = 1500; // Time-window flush in milliseconds
-        this.maxBatchSize = 20; // Trigger immediate flush if queue exceeds size
-        this.isLoggingInternal = false; // Recursion guard against infinite loops
-        this.flushTimer = null;
+export async function loadLogConfig() {
+    const sysConfig = await config.get('logger');
 
-        // Preserve native console methods for uninhibited terminal stdout/stderr
-        this.originalConsole = {
-            log: console.log.bind(console),
-            info: console.info.bind(console),
-            warn: console.warn.bind(console),
-            error: console.error.bind(console)
-        };
-
-        this.bindMethods();
-        this.setupIPCListeners();
-        this.patchConsole();
-        this.setupFlushTimer();
+    let dbConfig = null;
+    if (server && server.organization_id) {
+        dbConfig = await config.query({
+            type: 'logger',
+            organization_id: server.organization_id,
+            server: server.host,
+            cluster: server.cluster_id
+        });
     }
 
-    bindMethods() {
-        this.server.log = this.log.bind(this);
-        this.server.flushLogs = this.flushLogs.bind(this);
-        this.server.handleIncomingWorkerLog = this.handleIncomingWorkerLog.bind(this);
+    if (sysConfig) {
+        dotNotationToObject(logConfig, sysConfig);
     }
 
-    setupIPCListeners() {
-        // Listen for 'server.log' events on master process dispatched across IPC
-        if (this.server.isMaster) {
-            this.server.on('server.log', (message) => {
-                if (message && message.log) {
-                    this.handleIncomingWorkerLog(message.log);
-                }
-            });
-        }
+    if (dbConfig) {
+        dotNotationToObject(logConfig, dbConfig);
     }
 
-    patchConsole() {
-        const self = this;
+    return logConfig;
+}
 
-        const createConsoleProxy = (level, originalFn) => {
-            return function (...args) {
-                // Always execute original console method to print to standard stdout/stderr
-                originalFn.apply(console, args);
-
-                // Skip log capture if internal logging recursion flag is active
-                if (self.isLoggingInternal) return;
-
-                try {
-                    const message = args.map(arg => {
-                        if (typeof arg === 'string') return arg;
-                        if (arg instanceof Error) return arg.stack || arg.message;
-                        return util.inspect(arg, { depth: 3, colors: false });
-                    }).join(' ');
-
-                    self.log(level, message);
-                } catch (err) {
-                    // Fail gracefully to ensure native console execution is never disrupted
-                }
-            };
-        };
-
-        console.log = createConsoleProxy('info', this.originalConsole.log);
-        console.info = createConsoleProxy('info', this.originalConsole.info);
-        console.warn = createConsoleProxy('warn', this.originalConsole.warn);
-        console.error = createConsoleProxy('error', this.originalConsole.error);
-    }
-
-    log(level = 'info', message = '', metadata = null) {
-        if (this.isLoggingInternal) return;
-
-        const sourceWorker = this.server.isMaster ? 'master' : (this.server.workerId || 1);
-
-        const logEntry = {
-            timestamp: Date.now(),
-            workerId: sourceWorker,
-            level,
-            message,
-            ...(metadata && typeof metadata === 'object' ? { metadata } : {})
-        };
-
-        if (!this.server.isMaster) {
-            // Worker Process: Relay log entry to Master Orchestrator over IPC
-            if (typeof this.server.send === 'function') {
-                this.server.send({
-                    method: 'server.log',
-                    log: logEntry
-                });
-            } else if (process.send && process.connected) {
-                try {
-                    process.send({
-                        method: 'server.log',
-                        log: logEntry
-                    });
-                } catch (err) {
-                    // Fallback to original console error if IPC fails
-                    this.originalConsole.error('[@cocreate/server] [WORKER LOG IPC ERROR]', err.message);
-                }
+/**
+ * Attaches IPC event listeners on the master process to receive logs from workers.
+ */
+function setupIPCListeners() {
+    if (server?.isMaster) {
+        server.on('server.log', (message) => {
+            if (message && message.log) {
+                handleIncomingWorkerLog(message.log);
             }
-        } else {
-            // Master Process: Append directly to local log queue
-            this.enqueueLog(logEntry);
-        }
-    }
-
-    handleIncomingWorkerLog(logEntry) {
-        if (!this.server.isMaster || !logEntry) return;
-        this.enqueueLog(logEntry);
-    }
-
-    enqueueLog(logEntry) {
-        this.logQueue.push(logEntry);
-
-        // Immediately flush if queue hits batch limit or if an error level log is emitted
-        if (this.logQueue.length >= this.maxBatchSize || logEntry.level === 'error') {
-            this.flushLogs();
-        }
-    }
-
-    setupFlushTimer() {
-        if (!this.server.isMaster) return;
-
-        this.flushTimer = setInterval(() => {
-            this.flushLogs();
-        }, this.flushIntervalMs);
-
-        // Ensure flush timer doesn't keep node process alive during shutdown
-        if (this.flushTimer.unref) {
-            this.flushTimer.unref();
-        }
-    }
-
-    async flushLogs() {
-        if (!this.server.isMaster || this.logQueue.length === 0 || this.isLoggingInternal) return;
-
-        this.isLoggingInternal = true;
-
-        try {
-            const pendingLogs = [...this.logQueue];
-            this.logQueue = [];
-
-            // Maintain capped ring buffer of recent logs on Master
-            this.recentLogs = [...this.recentLogs, ...pendingLogs].slice(-this.maxLogs);
-
-            // Persist updated log ring buffer to the server object in DB
-            if (this.server.crud && typeof this.server.getServerObject === 'function') {
-                const payload = this.server.getServerObject({
-                    logs: this.recentLogs
-                });
-
-                await this.server.crud.send(payload);
-            }
-        } catch (err) {
-            this.originalConsole.error('[@cocreate/server] [LOG FLUSH ERROR]', err.message);
-        } finally {
-            this.isLoggingInternal = false;
-        }
-    }
-
-    destroy() {
-        if (this.flushTimer) {
-            clearInterval(this.flushTimer);
-            this.flushTimer = null;
-        }
-
-        console.log = this.originalConsole.log;
-        console.info = this.originalConsole.info;
-        console.warn = this.originalConsole.warn;
-        console.error = this.originalConsole.error;
+        });
     }
 }
 
-export default {
-    init(Server) {
-        return new LogManager(Server);
+/**
+ * Patches global console log/info/warn/error methods to capture stdout/stderr output.
+ */
+function patchConsole() {
+    const createConsoleProxy = (level, originalFn) => {
+        return function (...args) {
+            // Always execute original console method to print to standard stdout/stderr
+            originalFn.apply(console, args);
+
+            // Skip log capture if internal logging recursion flag is active
+            if (isLoggingInternal) return;
+
+            try {
+                const message = args.map(arg => {
+                    if (typeof arg === 'string') return arg;
+                    if (arg instanceof Error) return arg.stack || arg.message;
+                    return util.inspect(arg, { depth: 3, colors: false });
+                }).join(' ');
+
+                log(level, message);
+            } catch (err) {
+                // Fail gracefully to ensure native console execution is never disrupted
+            }
+        };
+    };
+
+    console.log = createConsoleProxy('info', originalConsole.log);
+    console.info = createConsoleProxy('info', originalConsole.info);
+    console.warn = createConsoleProxy('warn', originalConsole.warn);
+    console.error = createConsoleProxy('error', originalConsole.error);
+}
+
+/**
+ * Dispatches a log entry from either master or worker process.
+ * 
+ * @param {string} level - Log severity level ('info', 'warn', 'error')
+ * @param {string} message - Formatted log message text
+ * @param {Object|null} metadata - Optional contextual metadata object
+ */
+export function log(level = 'info', message = '', metadata = null) {
+    if (isLoggingInternal) return;
+
+    const sourceWorker = server?.isMaster ? 'master' : (server?.workerId || 1);
+
+    const logEntry = {
+        timestamp: Date.now(),
+        workerId: sourceWorker,
+        level,
+        message,
+        ...(metadata && typeof metadata === 'object' ? { metadata } : {})
+    };
+
+    if (!server?.isMaster) {
+        // Worker Process: Relay log entry to Master Orchestrator over IPC
+        if (typeof server?.send === 'function') {
+            server.send({
+                method: 'server.log',
+                log: logEntry
+            });
+        } else if (process.send && process.connected) {
+            try {
+                process.send({
+                    method: 'server.log',
+                    log: logEntry
+                });
+            } catch (err) {
+                originalConsole.error('[@cocreate/server] [WORKER LOG IPC ERROR]', err.message);
+            }
+        }
+    } else {
+        // Master Process: Append directly to local log queue
+        enqueueLog(logEntry);
     }
+}
+
+/**
+ * Handles incoming IPC log entries dispatched from cluster workers.
+ * 
+ * @param {Object} logEntry - Received log object
+ */
+export function handleIncomingWorkerLog(logEntry) {
+    if (!server?.isMaster || !logEntry) return;
+    enqueueLog(logEntry);
+}
+
+/**
+ * Enqueues a log entry into the processing queue and checks threshold conditions.
+ * 
+ * @param {Object} logEntry - Log item to queue
+ */
+export function enqueueLog(logEntry) {
+    logQueue.push(logEntry);
+
+    // Immediately flush if queue hits batch limit or if an error level log is emitted
+    if (logQueue.length >= logConfig.maxBatchSize || logEntry.level === 'error') {
+        flushLogs();
+    }
+}
+
+/**
+ * Configures interval timer for periodic buffer flushing on the master node.
+ */
+function setupFlushTimer() {
+    if (!server?.isMaster) return;
+
+    if (flushTimer) {
+        clearInterval(flushTimer);
+    }
+
+    flushTimer = setInterval(() => {
+        flushLogs();
+    }, logConfig.flushIntervalMs);
+
+    if (flushTimer.unref) {
+        flushTimer.unref();
+    }
+}
+
+/**
+ * Flushes pending log items from the queue to the database server object ring buffer.
+ */
+export async function flushLogs() {
+    if (!server?.isMaster || logQueue.length === 0 || isLoggingInternal) return;
+
+    isLoggingInternal = true;
+
+    try {
+        const pendingLogs = [...logQueue];
+        logQueue = [];
+
+        // Maintain capped ring buffer of recent logs on Master
+        recentLogs = [...recentLogs, ...pendingLogs].slice(-logConfig.maxLogs);
+
+        // Persist updated log ring buffer to the server object in DB
+        if (server.crud && typeof server.getServerObject === 'function') {
+            const payload = server.getServerObject({
+                logs: recentLogs
+            });
+
+            await server.crud.send(payload);
+        }
+    } catch (err) {
+        originalConsole.error('[@cocreate/server] [LOG FLUSH ERROR]', err.message);
+    } finally {
+        isLoggingInternal = false;
+    }
+}
+
+/**
+ * Restores original console behavior and clears flush timers.
+ */
+export function destroy() {
+    if (flushTimer) {
+        clearInterval(flushTimer);
+        flushTimer = null;
+    }
+
+    console.log = originalConsole.log;
+    console.info = originalConsole.info;
+    console.warn = originalConsole.warn;
+    console.error = originalConsole.error;
+}
+
+/**
+ * Initializes the LogManager service.
+ * 
+ * @param {Object} serverInstance - Core server instance
+ * @returns {Promise<Object>} Initialized module functions and data references
+ */
+export async function init(serverInstance) {
+    server = serverInstance;
+    server.log = log;
+
+    await loadLogConfig();
+    setupIPCListeners();
+    patchConsole();
+    setupFlushTimer();
+
+    return {
+        config: logConfig,
+        logQueue,
+        recentLogs,
+        log,
+        flushLogs,
+        destroy
+    };
+}
+
+export default {
+    init
 };

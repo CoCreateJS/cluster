@@ -22,7 +22,7 @@ import Https from 'node:https';
 import cluster from 'node:cluster';
 import os from 'node:os';
 
-import Certificates from '@cocreate/certificates';
+import TLS from '@cocreate/certificates';
 import ServerMesh from '@cocreate/server-mesh';
 import ServerAutoscaler from '@cocreate/server-autoscaler';
 import ServerTelemetry from '@cocreate/server-telemetry';
@@ -32,7 +32,6 @@ import authorize from '@cocreate/authorize';
 
 import SocketServer from '@cocreate/socket-server';
 import CrudServer from '@cocreate/crud-server';
-import LazyLoader from '@cocreate/lazy-loader';
 import FileServer from '@cocreate/file-server';
 import ApiServer from '@cocreate/api';
 
@@ -42,147 +41,230 @@ import getInfrastructure from './getInfrastructure.js';
 import IPC from './ipc.js';
 import Storage from './storage.js';
 import State from './state.js';
-import LogManager from './log.js';
-import TLS from './tls.js';
-
-const isMaster = cluster.isMaster;
-
-const pendingPromises = new Map();
-const activeWorkers = new Map();
+import Log from './log.js';
 
 /**
- * CoCreateServer orchestrates cluster process management, socket handling,
- * API endpoint dispatching, SSL certificates with SNI support, and mesh cluster synchronization.
+ * ClusterManager handles Node.js cluster process lifecycle, worker forks,
+ * worker exit respawning, IPC signal routing, and fallback master web servers.
  */
-export class CoCreateServer extends EventEmitter {
-    constructor() {
-        super();
-        this.id = process.env.SERVER_ID || null;
-        
-        this.isMaster = isMaster;
-        
-        if (this.isMaster) {
-            this.workers = activeWorkers;
-        } else {
-            this.workerId = parseInt(process.env.WORKER_ID, 10) || 1;
-        }
-        
+export class ClusterManager {
+    #emitter = new EventEmitter();
+
+    /**
+     * Creates an instance of ClusterManager.
+     * @param {CoCreateServer} server - Reference to parent server instance.
+     */
+    constructor(server) {
+        this.server = server;
+        this.isMaster = cluster.isMaster;
+        this.workers = new Map();
+        this.pendingPromises = new Map();
         this.totalWorkers = 0;
+        this.workerId = this.isMaster ? null : (parseInt(process.env.WORKER_ID, 10) || 1);
+    }
+
+    /** Delegate event listeners without polluting top-level prototype */
+    on(event, listener) { this.#emitter.on(event, listener); return this; }
+    once(event, listener) { this.#emitter.once(event, listener); return this; }
+    off(event, listener) { this.#emitter.off(event, listener); return this; }
+    emit(event, ...args) { return this.#emitter.emit(event, ...args); }
+
+    /**
+     * Resolves worker count configuration and assigns worker identity.
+     * @param {string|number|boolean} configuredWorkers - Worker configuration value.
+     */
+    configureWorkers(configuredWorkers) {
+        if (configuredWorkers !== false && configuredWorkers !== 'false') {
+            const parsedWorkers = parseInt(configuredWorkers, 10);
+            if (parsedWorkers === -1) {
+                this.totalWorkers = Math.max(1, os.cpus().length - 1);
+            } else {
+                this.totalWorkers = parsedWorkers || os.cpus().length;
+            }
+        }
+
+        if (this.isMaster && this.totalWorkers <= 1) {
+            this.workerId = 1;
+        }
+
+        // Sync resolved worker identity and total worker count to parent server
+        this.server.totalWorkers = this.totalWorkers;
+        this.server.workerId = this.workerId;
+    }
+
+    /**
+     * Initializes master cluster forks and listens for exit signals.
+     */
+    async setupMasterCluster() {
+        if (!this.server.state)
+            this.server.state = await State.init(this.server);
+        if (!this.isMaster || this.totalWorkers <= 1) return;
+
+        console.log(`[@cocreate/server] [MASTER] Orchestrator creating ${this.totalWorkers} workers.`);
+
+        const generateWorkerEnv = (wId) => ({
+            WORKER_ID: String(wId),
+            SERVER_ID: String(this.server.id || ''),
+            SERVER_IP: String(this.server.ip || '127.0.0.1'),
+            SERVER_INFRASTRUCTURE: JSON.stringify(this.server.infrastructure || {}),
+            SERVER_LOCATION: JSON.stringify(this.server.location || {})
+        });
+
+        const handleWorkerListeningMsg = (workerId, msg) => {
+            if (msg && msg.type === 'listening_state') {
+                const w = this.workers.get(workerId);
+                if (w) {
+                    w.isListening = Boolean(msg.state);
+                    if (this.server.state?.evaluateMasterFallback) {
+                        this.server.state.evaluateMasterFallback();
+                    }
+                }
+            }
+        };
+
+        for (let i = 0; i < this.totalWorkers; i++) {
+            const currentWorkerId = i + 1;
+            const worker = cluster.fork(generateWorkerEnv(currentWorkerId));
+
+            worker.on('error', (err) => {
+                console.error(`[@cocreate/server] [MASTER] Error on Worker ${currentWorkerId}:`, err.message);
+            });
+
+            worker.on('message', (msg) => handleWorkerListeningMsg(currentWorkerId, msg));
+
+            this.workers.set(currentWorkerId, {
+                id: currentWorkerId,
+                pid: worker.process.pid,
+                process: worker,
+                isListening: false
+            });
+        }
+
+        cluster.on('exit', async (worker, code, signal) => {
+            console.log(`[@cocreate/server] [MASTER] Worker ${worker.process.pid} exited (Code: ${code}, Signal: ${signal})`);
+            
+            let deadWorkerId = null;
+            for (let [id, w] of this.workers.entries()) {
+                if (w.pid === worker.process.pid) {
+                    deadWorkerId = id;
+                    this.workers.delete(id);
+                    break;
+                }
+            }
+
+            if (this.server.state?.evaluateMasterFallback) {
+                this.server.state.evaluateMasterFallback();
+            }
+            
+            if (deadWorkerId && this.server.crud) {
+                await this.server.crud.send(this.server.state.getServerObject({
+                    [`worker${deadWorkerId}`]: {
+                        pid: null,
+                        status: 'stopped',
+                        isCordoned: false,
+                        isShedding: false,
+                        isDraining: false
+                    }
+                }));
+            }
+
+            const state = this.server.state;
+            const isCordoned = state?.isCordon || state?.isCordoned;
+
+            if (state?.isShuttingDown || state?.isDraining || isCordoned) {
+                console.log(`[@cocreate/server] [MASTER] Worker ${worker.process.pid} removed. Active workers remaining: ${this.workers.size}`);
+                
+                if (this.workers.size === 0) {
+                    console.log("[@cocreate/server] [MASTER] All workers successfully drained.");
+                    if (this.server.state.masterShutdownTimeout) clearTimeout(this.server.state.masterShutdownTimeout);
+                    if (typeof this.server.state.shutdownCompletionCallback === 'function') {
+                        this.server.state.shutdownCompletionCallback();
+                    } else if (state?.isShuttingDown) {
+                        process.exit(0);
+                    }
+                }
+                return;
+            }
+
+            const targetId = deadWorkerId || (this.workers.size + 1);
+            
+            setTimeout(() => {
+                console.log(`[@cocreate/server] [MASTER] Respawning Worker ${targetId}...`);
+                const newWorker = cluster.fork(generateWorkerEnv(targetId));
+
+                newWorker.on('error', (err) => {
+                    console.error(`[@cocreate/server] [MASTER] Error on replacement Worker ${targetId}:`, err.message);
+                });
+
+                newWorker.on('message', (msg) => handleWorkerListeningMsg(targetId, msg));
+
+                this.workers.set(targetId, {
+                    id: targetId,
+                    pid: newWorker.process.pid,
+                    process: newWorker,
+                    isListening: false
+                });
+            }, 2000);
+        });
+    }
+}
+
+/**
+ * CoCreateServer orchestrates socket handling, API endpoint dispatching,
+ * SSL certificates with SNI support, and mesh cluster synchronization.
+ */
+export class CoCreateServer {
+    #emitter = new EventEmitter();
+
+    constructor() {
+        this.id = process.env.SERVER_ID || null;
         this.isInitialized = false;
 
-        // Attach TLS Manager module
-        this.tls = TLS.init(this);
+        // Dynamic route registry (supports host, path, method, handler)
+        this.routes = [];
 
-        // Initialize reactive cluster storage
-        this.storage = new Storage(this, pendingPromises);
-        this.store = this.storage;
-        this.workerStorage = this.storage;
+        // Encapsulate cluster management cleanly under dedicated property
+        this.cluster = new ClusterManager(this);
 
-        // Attach State Manager module
-        State.init(this);
+        // Directly bind cluster instance properties to parent server instance
+        this.isMaster = this.cluster.isMaster;
+        this.totalWorkers = this.cluster.totalWorkers;
 
-        // Attach Log Manager module
-        this.logManager = LogManager.init(this);
-
+        // Initialize reactive cluster storage bound to cluster IPC promises
+        this.storage = new Storage(this, this.cluster.pendingPromises);
         this.authenticate = authenticate;
         this.authorize = authorize;
     }
 
-    closeEdgeListeners() {
+    /** Public Event API delegates (keeps prototype clean from standard EventEmitter bloat) */
+    on(event, listener) { this.#emitter.on(event, listener); return this; }
+    once(event, listener) { this.#emitter.once(event, listener); return this; }
+    off(event, listener) { this.#emitter.off(event, listener); return this; }
+    emit(event, ...args) { return this.#emitter.emit(event, ...args); }
+
+    #closeEdgeListeners() {
         if (this.isMaster) return;
         if (this.http && this.http.listening) this.http.close();
         if (this.https && this.https.listening) this.https.close();
     }
 
-    restoreEdgeListeners() {
-        if (this.isMaster || this.state.isDraining) return;
+    closeEdgeListeners() {
+        return this.#closeEdgeListeners();
+    }
+
+    #restoreEdgeListeners() {
+        const isCordoned = this.state?.isCordon || this.state?.isCordoned;
+        if (this.isMaster || this.state?.isDraining || isCordoned || this.state?.isShuttingDown) return;
         const HTTP_PORT = process.env.HTTP_PORT || 80;
         const HTTPS_PORT = process.env.HTTPS_PORT || 443;
         const BIND_IP = process.env.BIND_IP || '0.0.0.0';
 
-        if (!this.http.listening) this.http.listen(HTTP_PORT, BIND_IP);
+        if (this.http && !this.http.listening) this.http.listen(HTTP_PORT, BIND_IP);
         if (this.https && !this.https.listening) this.https.listen(HTTPS_PORT, BIND_IP);
     }
 
-    /**
-     * Builds HTTPS configuration options specifically for Worker processes with SNI callback support.
-     * Uses default TLS certificates for localhost or loopback requests, and routes
-     * all multi-tenant custom domains through the worker's initialized Certificates module.
-     */
-    getWorkerHttpsOptions() {
-        const baseHttpsOptions = this.tls.createHttpsOptions();
-
-        return {
-            ...baseHttpsOptions,
-            SNICallback: (servername, cb) => {
-                // If request is localhost or IP loopback, use standard default TLS certificates
-                if (!servername || servername === 'localhost' || servername === '127.0.0.1' || servername === '::1') {
-                    return cb(null);
-                }
-
-                // Resolve SNI handler supporting both `sniCallback` and `SNICallback` naming conventions
-                const sniHandler = this.certificates?.sniCallback || this.certificates?.SNICallback;
-
-                // Delegate dynamic multi-tenant domain SSL context lookup asynchronously
-                if (typeof sniHandler === 'function') {
-                    return sniHandler.call(this.certificates, servername, (err, ctx) => {
-                        if (err || !ctx) {
-                            if (err) {
-                                console.warn(`[@cocreate/server] Dynamic SNI lookup failed for domain "${servername}":`, err.message);
-                            }
-                            // Fallback to default TLS certificate if non-localhost domain lookup fails
-                            return cb(null);
-                        }
-                        return cb(null, ctx);
-                    });
-                }
-
-                // Fallback to standard base TLS certificates if no certificate module is initialized
-                return cb(null);
-            }
-        };
-    }
-
-    evaluateMasterFallback() {
-        if (!this.isMaster) return;
-
-        const allWorkersDown = Array.from(this.workers.values()).every(w => w.isListening === false);
-
-        if (allWorkersDown) {
-            if (!this.fallbackHttpServer && !this.state.isCordon) {
-                const HTTP_PORT = process.env.HTTP_PORT || 80;
-                const HTTPS_PORT = process.env.HTTPS_PORT || 443;
-                const BIND_IP = process.env.BIND_IP || '0.0.0.0';
-
-                const handleFallback = (req, res) => {
-                    res.writeHead(500, { 
-                        "Content-Type": "text/plain",
-                        "Retry-After": "5"
-                    });
-                    res.end("Service Unavailable: All workers cordoned or inactive");
-                };
-                
-                this.fallbackHttpServer = Http.createServer(handleFallback);
-                this.fallbackHttpServer.listen(HTTP_PORT, BIND_IP);
-
-                // Create basic TLS options without SNI lookup overhead for Master fallback mode
-                const httpsOptions = this.tls.createHttpsOptions();
-                this.fallbackHttpsServer = Https.createServer(httpsOptions, handleFallback);
-                this.fallbackHttpsServer.listen(HTTPS_PORT, BIND_IP);
-                
-                console.log(`[@cocreate/server] [MASTER] All workers cordoned/down. Master fallback active (500 mode).`);
-            }
-        } else {
-            if (this.fallbackHttpServer) {
-                this.fallbackHttpServer.close();
-                this.fallbackHttpServer = null;
-                if (this.fallbackHttpsServer) {
-                    this.fallbackHttpsServer.close();
-                    this.fallbackHttpsServer = null;
-                }
-                console.log(`[@cocreate/server] [MASTER] Workers active. Deactivating Master fallback.`);
-            }
-        }
+    restoreEdgeListeners() {
+        return this.#restoreEdgeListeners();
     }
 
     async init() {
@@ -191,7 +273,10 @@ export class CoCreateServer extends EventEmitter {
         }
 
         this.isInitialized = true;
-        this.send = IPC.init(this, pendingPromises);
+
+        this.log = await Log.init(this);
+        this.state = await State.init(this);
+        this.send = IPC.init(this, this.cluster.pendingPromises);
 
         const config = await Config.prompt({
             'organization_id': '',
@@ -216,19 +301,8 @@ export class CoCreateServer extends EventEmitter {
             this.id = process.env.SERVER_ID;
         }
 
-        let configuredWorkers = config.workers;
-        if (configuredWorkers !== false && configuredWorkers !== 'false') {
-            const parsedWorkers = parseInt(configuredWorkers, 10);
-            if (parsedWorkers === -1) {
-                this.totalWorkers = Math.max(1, os.cpus().length - 1);
-            } else {
-                this.totalWorkers = parsedWorkers || os.cpus().length;
-            }
-        }
-
-        if (this.isMaster && this.totalWorkers <= 1) {
-            this.workerId = 1;
-        }
+        // Configure workers in ClusterManager
+        this.cluster.configureWorkers(config.workers);
 
         this.crud = await CrudServer.init(this);
         this.mesh = ServerMesh;
@@ -242,10 +316,10 @@ export class CoCreateServer extends EventEmitter {
             this.autoscaler = await ServerAutoscaler.init(this);
 
             // Reset logs array for a fresh logging session on master startup
-            await this.crud.send(this.getServerObject({ logs: [] }));
+            await this.crud.send(this.state.getServerObject({ logs: [] }));
 
             // Register initial running profile to DB for Master
-            await this.publishState();
+            await this.state.save('running');
             
             // Zero-out worker states in DB upon master initialization
             if (this.totalWorkers > 0) {
@@ -260,7 +334,7 @@ export class CoCreateServer extends EventEmitter {
                     };
                 }
 
-                await this.crud.send(this.getServerObject(initialWorkerStates));
+                await this.crud.send(this.state.getServerObject(initialWorkerStates));
             }
 
             // Route mesh commands to IPC
@@ -272,97 +346,17 @@ export class CoCreateServer extends EventEmitter {
                 });
             }
 
+            this.workers = this.cluster.workers; // Direct reference to the workers Map instance
+
             if (this.totalWorkers > 1) {
-                console.log(`[@cocreate/server] [MASTER] Orchestrator creating ${this.totalWorkers} workers.`);
-
-                const generateWorkerEnv = (wId) => ({
-                    WORKER_ID: String(wId),
-                    SERVER_ID: String(this.id || ''),
-                    SERVER_IP: String(this.ip || '127.0.0.1'),
-                    SERVER_INFRASTRUCTURE: JSON.stringify(this.infrastructure || {}),
-                    SERVER_LOCATION: JSON.stringify(this.location || {})
-                });
-
-                for (let i = 0; i < this.totalWorkers; i++) {
-                    const currentWorkerId = i + 1;
-                    const worker = cluster.fork(generateWorkerEnv(currentWorkerId));
-
-                    worker.on('error', (err) => {
-                        console.error(`[@cocreate/server] [MASTER] Error on Worker ${currentWorkerId}:`, err.message);
-                    });
-
-                    activeWorkers.set(currentWorkerId, {
-                        id: currentWorkerId,
-                        pid: worker.process.pid,
-                        process: worker,
-                        isListening: false
-                    });
-                }
-
-                cluster.on('exit', async (worker, code, signal) => {
-                    console.log(`[@cocreate/server] [MASTER] Worker ${worker.process.pid} exited (Code: ${code}, Signal: ${signal})`);
-                    
-                    let deadWorkerId = null;
-                    for (let [id, w] of activeWorkers.entries()) {
-                        if (w.pid === worker.process.pid) {
-                            deadWorkerId = id;
-                            activeWorkers.delete(id);
-                            break;
-                        }
-                    }
-                    this.evaluateMasterFallback();
-                    
-                    if (deadWorkerId) {
-                        await this.crud.send(this.getServerObject({
-                            [`worker${deadWorkerId}`]: {
-                                pid: null,
-                                status: 'stopped',
-                                isCordoned: false,
-                                isShedding: false,
-                                isDraining: false
-                            }
-                        }));
-                    }
-
-                    if (this.state.isShuttingDown || this.state.isDraining) {
-                        console.log(`[@cocreate/server] [MASTER] Worker ${worker.process.pid} removed. Active workers remaining: ${activeWorkers.size}`);
-                        
-                        if (activeWorkers.size === 0) {
-                            console.log("[@cocreate/server] [MASTER] All workers successfully drained.");
-                            if (this.state.masterShutdownTimeout) clearTimeout(this.state.masterShutdownTimeout);
-                            if (typeof this.state.shutdownCompletionCallback === 'function') {
-                                this.state.shutdownCompletionCallback();
-                            } else {
-                                process.exit(0);
-                            }
-                        }
-                        return;
-                    }
-
-                    const targetId = deadWorkerId || (activeWorkers.size + 1);
-                    
-                    setTimeout(() => {
-                        console.log(`[@cocreate/server] [MASTER] Respawning Worker ${targetId}...`);
-                        const newWorker = cluster.fork(generateWorkerEnv(targetId));
-
-                        newWorker.on('error', (err) => {
-                            console.error(`[@cocreate/server] [MASTER] Error on replacement Worker ${targetId}:`, err.message);
-                        });
-
-                        activeWorkers.set(targetId, {
-                            id: targetId,
-                            pid: newWorker.process.pid,
-                            process: newWorker,
-                            isListening: false
-                        });
-                    }, 2000);
-                });
-
+                await this.cluster.setupMasterCluster();
                 return this;
             }
         }
 
         if (!this.isMaster || this.totalWorkers <= 1) {
+            this.workerId = this.cluster.workerId;
+
             if (!this.isMaster) {
                 console.log(`[@cocreate/server] [WORKER ${this.workerId}] running with PID: ${process.pid} (Server ID: ${this.id})`);
             }
@@ -394,11 +388,11 @@ export class CoCreateServer extends EventEmitter {
             }
 
             // Initialize certificates module on worker
-            this.certificates = await Certificates.init(this);
+            this.tls = await TLS.init(this);
 
             // Create HTTPS options with dynamic SNICallback for multi-tenant domains
-            const httpsOptions = this.getWorkerHttpsOptions();
-            this.https = Https.createServer(httpsOptions, (req, res) => this.handleEdgeRequest(req, res));
+            const httpsOptions = this.tls.createHttpsOptions(this);
+            this.https = Https.createServer(httpsOptions, (req, res) => this.#handleEdgeRequest(req, res));
             
             const HTTP_PORT = process.env.HTTP_PORT || 80;
             const HTTPS_PORT = process.env.HTTPS_PORT || 443;
@@ -409,7 +403,7 @@ export class CoCreateServer extends EventEmitter {
                 
                 // 1. Allow ACME challenges to pass through over unencrypted HTTP
                 if (requestUrl.startsWith('/.well-known/acme-challenge/')) {
-                    return this.handleEdgeRequest(req, res);
+                    return this.#handleEdgeRequest(req, res);
                 }
                 
                 // 2. Force a 301 redirect to HTTPS for all traffic (preserving non-standard ports)
@@ -424,7 +418,6 @@ export class CoCreateServer extends EventEmitter {
             this.wsManager = new SocketServer(this);
             this.api = await ApiServer.init(this);
             this.files = FileServer.init(this);
-            this.loader = await LazyLoader.init(this);
 
             const reportListening = (state) => {
                 if (process.connected) {
@@ -443,22 +436,70 @@ export class CoCreateServer extends EventEmitter {
             });
 
             // Publish worker active running state object to DB upon creation/startup
-            await this.publishState('running');
+            await this.state.save('running');
         }
-
+        
         return this;
     }
 
-    async handleEdgeRequest(req, res) {
+    /**
+     * Internal private request handler that evaluates registered user routes,
+     * matching on host, path, and HTTP method before falling back to built-in handlers.
+     * @param {Http.IncomingMessage} req 
+     * @param {Http.ServerResponse} res 
+     */
+    async #handleEdgeRequest(req, res) {
         try {
-            const requestUrl = req.url || '/';
+            const rawHost = req.headers.host || '';
+            const reqHost = rawHost.split(':')[0].toLowerCase();
+            const rawUrl = req.url || '/';
+            const [reqPath] = rawUrl.split('?');
+            const reqMethod = (req.method || 'GET').toUpperCase();
 
-            if (requestUrl.startsWith("/webhooks/")) {
-                return this.loader.request(req, res);
+            // 1. Process registered custom routes in this.routes
+            for (const route of this.routes) {
+                // Host match check (omitted or '*' matches any host)
+                if (route.host && route.host !== '*') {
+                    const routeHost = route.host.toLowerCase();
+                    const isHostMatch = routeHost.endsWith('*') 
+                        ? reqHost.startsWith(routeHost.slice(0, -1))
+                        : reqHost === routeHost;
+                    if (!isHostMatch) continue;
+                }
+
+                // Method match check (omitted, 'ALL', or '*' matches any method)
+                if (route.method && route.method !== 'ALL' && route.method !== '*') {
+                    if (route.method.toUpperCase() !== reqMethod) continue;
+                }
+
+                // Path match check (omitted or '*' matches any path)
+                const routePath = route.path || '*';
+                const isPathMatch = routePath === '*' || 
+                                    routePath === reqPath || 
+                                    (routePath.endsWith('*') && reqPath.startsWith(routePath.slice(0, -1)));
+
+                if (isPathMatch && typeof route.handler === 'function') {
+                    await route.handler(req, res);
+
+                    // If handler responded or started sending headers, conclude routing cycle
+                    if (res.writableEnded || res.headersSent) {
+                        return;
+                    }
+                }
             }
+
+            // 2. Default route handling: API webhooks
+            if (reqPath.startsWith("/webhooks/")) {
+                return this.api.request(req, res);
+            }
+
+            // 3. Default route handling: Static file server
             return this.files.send(req, res);
         } catch (error) {
-            res.writeHead(500, { "Content-Type": "text/plain" });
+            console.error('[@cocreate/server] Edge request routing error:', error);
+            if (!res.headersSent) {
+                res.writeHead(500, { "Content-Type": "text/plain" });
+            }
             res.end("Internal Error: Request routing failed");
         }
     }

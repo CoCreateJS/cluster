@@ -91,7 +91,7 @@ export function init(Server, pendingPromises) {
                     }
                     
                     if (activeRemaining === 0) {
-                        Server.evaluateMasterFallback();
+                        Server.state.evaluateMasterFallback();
                     }
                 }
             }
