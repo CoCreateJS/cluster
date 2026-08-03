@@ -22,7 +22,7 @@ import Https from 'node:https';
 import cluster from 'node:cluster';
 import os from 'node:os';
 
-import TLS from '@cocreate/certificates';
+import TLS from '@cocreate/server-tls';
 import ServerMesh from '@cocreate/server-mesh';
 import ServerAutoscaler from '@cocreate/server-autoscaler';
 import ServerTelemetry from '@cocreate/server-telemetry';
@@ -220,8 +220,8 @@ export class CoCreateServer {
         this.id = process.env.SERVER_ID || null;
         this.isInitialized = false;
 
-        // Dynamic route registry (supports host, path, method, handler)
-        this.routes = [];
+        // Dynamic route registry (Map key: route path, value: request handler callback)
+        this.routes = new Map();
 
         // Encapsulate cluster management cleanly under dedicated property
         this.cluster = new ClusterManager(this);
@@ -354,7 +354,9 @@ export class CoCreateServer {
             }
         }
 
-        if (!this.isMaster || this.totalWorkers <= 1) {
+        this.isWorker = (!this.isMaster || this.totalWorkers <= 1);
+        
+        if (this.isWorker) {
             this.workerId = this.cluster.workerId;
 
             if (!this.isMaster) {
@@ -417,7 +419,7 @@ export class CoCreateServer {
 
             this.wsManager = new SocketServer(this);
             this.api = await ApiServer.init(this);
-            this.files = FileServer.init(this);
+            this.files = await FileServer.init(this);
 
             const reportListening = (state) => {
                 if (process.connected) {
@@ -444,47 +446,33 @@ export class CoCreateServer {
 
     /**
      * Internal private request handler that evaluates registered user routes,
-     * matching on host, path, and HTTP method before falling back to built-in handlers.
+     * matching exact paths or wildcard directory patterns from this.routes Map.
      * @param {Http.IncomingMessage} req 
      * @param {Http.ServerResponse} res 
      */
     async #handleEdgeRequest(req, res) {
         try {
-            const rawHost = req.headers.host || '';
-            const reqHost = rawHost.split(':')[0].toLowerCase();
             const rawUrl = req.url || '/';
             const [reqPath] = rawUrl.split('?');
-            const reqMethod = (req.method || 'GET').toUpperCase();
 
-            // 1. Process registered custom routes in this.routes
-            for (const route of this.routes) {
-                // Host match check (omitted or '*' matches any host)
-                if (route.host && route.host !== '*') {
-                    const routeHost = route.host.toLowerCase();
-                    const isHostMatch = routeHost.endsWith('*') 
-                        ? reqHost.startsWith(routeHost.slice(0, -1))
-                        : reqHost === routeHost;
-                    if (!isHostMatch) continue;
-                }
+            // 1. Direct O(1) exact match lookup or directory/wildcard pattern matching in this.routes Map
+            let handler = this.routes.get(reqPath);
 
-                // Method match check (omitted, 'ALL', or '*' matches any method)
-                if (route.method && route.method !== 'ALL' && route.method !== '*') {
-                    if (route.method.toUpperCase() !== reqMethod) continue;
-                }
-
-                // Path match check (omitted or '*' matches any path)
-                const routePath = route.path || '*';
-                const isPathMatch = routePath === '*' || 
-                                    routePath === reqPath || 
-                                    (routePath.endsWith('*') && reqPath.startsWith(routePath.slice(0, -1)));
-
-                if (isPathMatch && typeof route.handler === 'function') {
-                    await route.handler(req, res);
-
-                    // If handler responded or started sending headers, conclude routing cycle
-                    if (res.writableEnded || res.headersSent) {
-                        return;
+            if (!handler) {
+                for (const [routePath, routeHandler] of this.routes.entries()) {
+                    if (routePath === '*' || (routePath.endsWith('*') && reqPath.startsWith(routePath.slice(0, -1)))) {
+                        handler = routeHandler;
+                        break;
                     }
+                }
+            }
+
+            if (handler && typeof handler === 'function') {
+                await handler(req, res);
+
+                // If handler responded or started sending headers, conclude routing cycle
+                if (res.writableEnded || res.headersSent) {
+                    return;
                 }
             }
 
