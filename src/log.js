@@ -25,6 +25,7 @@ let logQueue = [];
 let recentLogs = [];
 let isLoggingInternal = false; // Recursion guard against infinite loops
 let flushTimer = null;
+let isConsolePatched = false;
 
 let logConfig = {
     maxLogs: 100, // Capped ring buffer size on server document
@@ -42,7 +43,7 @@ const originalConsole = {
 
 /**
  * Loads system configuration using @cocreate/config and queries database overrides
- * for 'logManager' or 'logger' configurations.
+ * for 'logger' configurations.
  * 
  * @returns {Promise<Object>} Resolved logging configuration object
  */
@@ -87,6 +88,8 @@ function setupIPCListeners() {
  * Patches global console log/info/warn/error methods to capture stdout/stderr output.
  */
 function patchConsole() {
+    if (isConsolePatched) return;
+
     const createConsoleProxy = (level, originalFn) => {
         return function (...args) {
             // Always execute original console method to print to standard stdout/stderr
@@ -113,6 +116,22 @@ function patchConsole() {
     console.info = createConsoleProxy('info', originalConsole.info);
     console.warn = createConsoleProxy('warn', originalConsole.warn);
     console.error = createConsoleProxy('error', originalConsole.error);
+
+    isConsolePatched = true;
+}
+
+/**
+ * Restores original console behavior.
+ */
+function unpatchConsole() {
+    if (!isConsolePatched) return;
+
+    console.log = originalConsole.log;
+    console.info = originalConsole.info;
+    console.warn = originalConsole.warn;
+    console.error = originalConsole.error;
+
+    isConsolePatched = false;
 }
 
 /**
@@ -178,7 +197,7 @@ export function enqueueLog(logEntry) {
 
     // Immediately flush if queue hits batch limit or if an error level log is emitted
     if (logQueue.length >= logConfig.maxBatchSize || logEntry.level === 'error') {
-        flushLogs();
+        save();
     }
 }
 
@@ -193,7 +212,7 @@ function setupFlushTimer() {
     }
 
     flushTimer = setInterval(() => {
-        flushLogs();
+        save();
     }, logConfig.flushIntervalMs);
 
     if (flushTimer.unref) {
@@ -204,7 +223,7 @@ function setupFlushTimer() {
 /**
  * Flushes pending log items from the queue to the database server object ring buffer.
  */
-export async function flushLogs() {
+export async function save() {
     if (!server?.isMaster || logQueue.length === 0 || isLoggingInternal) return;
 
     isLoggingInternal = true;
@@ -232,22 +251,34 @@ export async function flushLogs() {
 }
 
 /**
- * Restores original console behavior and clears flush timers.
+ * Starts or resumes the logging service (patches console and sets flush timer).
  */
-export function destroy() {
+export function start() {
+    patchConsole();
+    setupFlushTimer();
+}
+
+/**
+ * Stops or pauses the logging service (flushes remaining queue, stops timer, unpatches console).
+ * 
+ * @returns {Promise<void>}
+ */
+export async function stop() {
     if (flushTimer) {
         clearInterval(flushTimer);
         flushTimer = null;
     }
 
-    console.log = originalConsole.log;
-    console.info = originalConsole.info;
-    console.warn = originalConsole.warn;
-    console.error = originalConsole.error;
+    // Perform final sync/flush of any queued logs before shutting down console listeners
+    if (logQueue.length > 0) {
+        await save();
+    }
+
+    unpatchConsole();
 }
 
 /**
- * Initializes the LogManager service.
+ * Initializes the LogManager service and starts logging.
  * 
  * @param {Object} serverInstance - Core server instance
  * @returns {Promise<Object>} Initialized module functions and data references
@@ -258,16 +289,14 @@ export async function init(serverInstance) {
 
     await loadLogConfig();
     setupIPCListeners();
-    patchConsole();
-    setupFlushTimer();
+    start();
 
     return {
         config: logConfig,
-        logQueue,
         recentLogs,
-        log,
-        flushLogs,
-        destroy
+        save,
+        start,
+        stop
     };
 }
 

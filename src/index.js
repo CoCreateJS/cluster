@@ -231,7 +231,7 @@ export class CoCreateServer {
         this.totalWorkers = this.cluster.totalWorkers;
 
         // Initialize reactive cluster storage bound to cluster IPC promises
-        this.storage = new Storage(this, this.cluster.pendingPromises);
+        this.storage = Storage.init(this, this.cluster.pendingPromises);
         this.authenticate = authenticate;
         this.authorize = authorize;
     }
