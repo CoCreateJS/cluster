@@ -34,6 +34,7 @@ import SocketServer from '@cocreate/socket-server';
 import CrudServer from '@cocreate/crud-server';
 import FileServer from '@cocreate/file-server';
 import ApiServer from '@cocreate/api';
+import Usage from '@cocreate/usage';
 
 import { ObjectId, getClientInfo } from '@cocreate/utils';
 
@@ -364,6 +365,7 @@ export class CoCreateServer {
             }
 
             this.telemetry = await ServerTelemetry.init(this);
+            this.usage = await Usage.init(this);
 
             if (!this.ip) {
                 this.ip = process.env.SERVER_IP || (await getClientInfo()).ip;
