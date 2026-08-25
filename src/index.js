@@ -143,7 +143,7 @@ export class ClusterManager {
 
         cluster.on('exit', async (worker, code, signal) => {
             console.log(`[@cocreate/server] [MASTER] Worker ${worker.process.pid} exited (Code: ${code}, Signal: ${signal})`);
-            
+
             let deadWorkerId = null;
             for (let [id, w] of this.workers.entries()) {
                 if (w.pid === worker.process.pid) {
@@ -156,7 +156,7 @@ export class ClusterManager {
             if (this.server.state?.evaluateMasterFallback) {
                 this.server.state.evaluateMasterFallback();
             }
-            
+
             if (deadWorkerId && this.server.crud) {
                 await this.server.crud.send(this.server.state.getServerObject({
                     [`worker${deadWorkerId}`]: {
@@ -174,7 +174,7 @@ export class ClusterManager {
 
             if (state?.isShuttingDown || state?.isDraining || isCordoned) {
                 console.log(`[@cocreate/server] [MASTER] Worker ${worker.process.pid} removed. Active workers remaining: ${this.workers.size}`);
-                
+
                 if (this.workers.size === 0) {
                     console.log("[@cocreate/server] [MASTER] All workers successfully drained.");
                     if (this.server.state.masterShutdownTimeout) clearTimeout(this.server.state.masterShutdownTimeout);
@@ -188,7 +188,7 @@ export class ClusterManager {
             }
 
             const targetId = deadWorkerId || (this.workers.size + 1);
-            
+
             setTimeout(() => {
                 console.log(`[@cocreate/server] [MASTER] Respawning Worker ${targetId}...`);
                 const newWorker = cluster.fork(generateWorkerEnv(targetId));
@@ -309,7 +309,7 @@ export class CoCreateServer {
         this.mesh = ServerMesh;
 
         if (this.isMaster) {
-            console.log(`[@cocreate/server] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);            
+            console.log(`[@cocreate/server] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);
             this.location = await getClientInfo();
             this.ip = this.location.ip;
             this.infrastructure = await getInfrastructure(this.id);
@@ -321,7 +321,7 @@ export class CoCreateServer {
 
             // Register initial running profile to DB for Master
             await this.state.save('running');
-            
+
             // Zero-out worker states in DB upon master initialization
             if (this.totalWorkers > 0) {
                 const initialWorkerStates = {};
@@ -356,7 +356,7 @@ export class CoCreateServer {
         }
 
         this.isWorker = (!this.isMaster || this.totalWorkers <= 1);
-        
+
         if (this.isWorker) {
             this.workerId = this.cluster.workerId;
 
@@ -373,8 +373,8 @@ export class CoCreateServer {
 
             if (!this.infrastructure) {
                 try {
-                    this.infrastructure = process.env.SERVER_INFRASTRUCTURE 
-                        ? JSON.parse(process.env.SERVER_INFRASTRUCTURE) 
+                    this.infrastructure = process.env.SERVER_INFRASTRUCTURE
+                        ? JSON.parse(process.env.SERVER_INFRASTRUCTURE)
                         : await getInfrastructure(this.id);
                 } catch (error) {
                     this.infrastructure = await getInfrastructure(this.id);
@@ -384,7 +384,7 @@ export class CoCreateServer {
             if (!this.location) {
                 try {
                     this.location = process.env.SERVER_LOCATION
-                        ? JSON.parse(process.env.SERVER_LOCATION) 
+                        ? JSON.parse(process.env.SERVER_LOCATION)
                         : await getClientInfo(this.id);
                 } catch (error) {
                     this.location = await getClientInfo(this.id);
@@ -397,24 +397,24 @@ export class CoCreateServer {
             // Create HTTPS options with dynamic SNICallback for multi-tenant domains
             const httpsOptions = this.tls.createHttpsOptions(this);
             this.https = Https.createServer(httpsOptions, (req, res) => this.#handleEdgeRequest(req, res));
-            
+
             const HTTP_PORT = process.env.HTTP_PORT || 80;
             const HTTPS_PORT = process.env.HTTPS_PORT || 443;
             const BIND_IP = process.env.BIND_IP || '0.0.0.0';
 
             this.http = Http.createServer((req, res) => {
                 const requestUrl = req.url || '/';
-                
+
                 // 1. Allow ACME challenges to pass through over unencrypted HTTP
                 if (requestUrl.startsWith('/.well-known/acme-challenge/')) {
                     return this.#handleEdgeRequest(req, res);
                 }
-                
+
                 // 2. Force a 301 redirect to HTTPS for all traffic (preserving non-standard ports)
                 const rawHost = req.headers.host || 'localhost';
                 const host = rawHost.split(':')[0];
                 const portSuffix = (HTTPS_PORT && String(HTTPS_PORT) !== '443') ? `:${HTTPS_PORT}` : '';
-                
+
                 res.writeHead(301, { "Location": `https://${host}${portSuffix}${requestUrl}` });
                 res.end();
             });
@@ -442,7 +442,7 @@ export class CoCreateServer {
             // Publish worker active running state object to DB upon creation/startup
             await this.state.save('running');
         }
-        
+
         return this;
     }
 
@@ -480,7 +480,7 @@ export class CoCreateServer {
 
             // 2. Default route handling: API webhooks
             if (reqPath.startsWith("/webhooks/")) {
-                return this.api.request(req, res);
+                return this.api.webhook(req, res);
             }
 
             // 3. Default route handling: Static file server
