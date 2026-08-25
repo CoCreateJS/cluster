@@ -69,19 +69,19 @@
     "./storage/yugabytedb": "./storage/postgresql.js"
   },
   "dependencies": {
-    "@cocreate/authenticate": "^1.16.0",
-    "@cocreate/authorize": "^1.20.0",
-    "@cocreate/config": "^1.19.0",
-    "@cocreate/cron-jobs": "^1.8.0",
-    "@cocreate/crud-server": "^1.41.0",
-    "@cocreate/file-server": "^1.24.0",
-    "@cocreate/lazy-loader": "^1.29.0",
-    "@cocreate/server-autoscaler": "^1.4.0",
-    "@cocreate/server-mesh": "^1.6.0",
-    "@cocreate/server-telemetry": "^1.20.0",
-    "@cocreate/server-tls": "^1.11.0",
-    "@cocreate/socket-server": "^1.35.2",
-    "@cocreate/usage": "^1.7.0",
-    "@cocreate/utils": "^1.52.0"
+    "@cocreate/authenticate": "^1.17.0",
+    "@cocreate/authorize": "^1.21.0",
+    "@cocreate/config": "^1.21.0",
+    "@cocreate/cron-jobs": "^1.9.0",
+    "@cocreate/crud-server": "^1.42.0",
+    "@cocreate/file-server": "^1.25.0",
+    "@cocreate/lazy-loader": "^1.31.0",
+    "@cocreate/server-autoscaler": "^1.5.0",
+    "@cocreate/server-mesh": "^1.7.0",
+    "@cocreate/server-telemetry": "^1.21.0",
+    "@cocreate/server-tls": "^1.12.0",
+    "@cocreate/socket-server": "^1.36.0",
+    "@cocreate/usage": "^1.8.0",
+    "@cocreate/utils": "^1.54.0"
   }
 }
