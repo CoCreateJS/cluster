@@ -27,7 +27,7 @@ import cluster from 'node:cluster';
  * @returns {Function} Context-aware send function for dispatching cluster messages
  */
 export function init(Server, pendingPromises) {
-    if (Server.isMaster) {
+    if (Server.isPrimary) {
         cluster.on('message', async (worker, message) => {
             if (!message || typeof message !== 'object') return;
 

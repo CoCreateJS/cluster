@@ -57,11 +57,11 @@ export class ClusterManager {
      */
     constructor(server) {
         this.server = server;
-        this.isMaster = cluster.isMaster;
+        this.isPrimary = cluster.isPrimary;
         this.workers = new Map();
         this.pendingPromises = new Map();
         this.totalWorkers = 0;
-        this.workerId = this.isMaster ? null : (parseInt(process.env.WORKER_ID, 10) || 1);
+        this.workerId = this.isPrimary ? null : (parseInt(process.env.WORKER_ID, 10) || 1);
     }
 
     /** Delegate event listeners without polluting top-level prototype */
@@ -84,7 +84,7 @@ export class ClusterManager {
             }
         }
 
-        if (this.isMaster && this.totalWorkers <= 1) {
+        if (this.isPrimary && this.totalWorkers <= 1) {
             this.workerId = 1;
         }
 
@@ -99,7 +99,7 @@ export class ClusterManager {
     async setupMasterCluster() {
         if (!this.server.state)
             this.server.state = await State.init(this.server);
-        if (!this.isMaster || this.totalWorkers <= 1) return;
+        if (!this.isPrimary || this.totalWorkers <= 1) return;
 
         console.log(`[@cocreate/server] [MASTER] Orchestrator creating ${this.totalWorkers} workers.`);
 
@@ -228,7 +228,7 @@ export class CoCreateServer {
         this.cluster = new ClusterManager(this);
 
         // Directly bind cluster instance properties to parent server instance
-        this.isMaster = this.cluster.isMaster;
+        this.isPrimary = this.cluster.isPrimary;
         this.totalWorkers = this.cluster.totalWorkers;
 
         // Initialize reactive cluster storage bound to cluster IPC promises
@@ -244,7 +244,7 @@ export class CoCreateServer {
     emit(event, ...args) { return this.#emitter.emit(event, ...args); }
 
     #closeEdgeListeners() {
-        if (this.isMaster) return;
+        if (this.isPrimary) return;
         if (this.http && this.http.listening) this.http.close();
         if (this.https && this.https.listening) this.https.close();
     }
@@ -255,7 +255,7 @@ export class CoCreateServer {
 
     #restoreEdgeListeners() {
         const isCordoned = this.state?.isCordon || this.state?.isCordoned;
-        if (this.isMaster || this.state?.isDraining || isCordoned || this.state?.isShuttingDown) return;
+        if (this.isPrimary || this.state?.isDraining || isCordoned || this.state?.isShuttingDown) return;
         const HTTP_PORT = process.env.HTTP_PORT || 80;
         const HTTPS_PORT = process.env.HTTPS_PORT || 443;
         const BIND_IP = process.env.BIND_IP || '0.0.0.0';
@@ -289,7 +289,7 @@ export class CoCreateServer {
         this.organization_id = config.organization_id || null;
         this.host = config.host || null;
 
-        if (this.isMaster) {
+        if (this.isPrimary) {
             if (config.server_id) {
                 this.id = config.server_id;
             } else {
@@ -308,7 +308,7 @@ export class CoCreateServer {
         this.crud = await CrudServer.init(this);
         this.mesh = ServerMesh;
 
-        if (this.isMaster) {
+        if (this.isPrimary) {
             console.log(`[@cocreate/server] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);
             this.location = await getClientInfo();
             this.ip = this.location.ip;
@@ -355,12 +355,12 @@ export class CoCreateServer {
             }
         }
 
-        this.isWorker = (!this.isMaster || this.totalWorkers <= 1);
+        this.isWorker = (!this.isPrimary || this.totalWorkers <= 1);
 
         if (this.isWorker) {
             this.workerId = this.cluster.workerId;
 
-            if (!this.isMaster) {
+            if (!this.isPrimary) {
                 console.log(`[@cocreate/server] [WORKER ${this.workerId}] running with PID: ${process.pid} (Server ID: ${this.id})`);
             }
 

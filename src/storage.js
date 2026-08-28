@@ -31,7 +31,7 @@ export function init(server) {
     const workerId = server?.workerId || 1;
     const pendingPromises = server?.cluster?.pendingPromises;
 
-    if (server && !server.isMaster) {
+    if (server && !server.isPrimary) {
         server.on('cluster_state_sync', (payload) => {
             if (payload && payload.key !== undefined) {
                 if (payload.value === undefined) {
@@ -58,7 +58,7 @@ export function init(server) {
          * @returns {Promise<boolean>} Resolves when state is set or synced
          */
         async set(key, value) {
-            if (server.isMaster) {
+            if (server.isPrimary) {
                 store.set(key, value);
                 emitter.emit(`change:${key}`, value);
                 emitter.emit('change', { key, value });
@@ -94,7 +94,7 @@ export function init(server) {
          * @returns {Promise<*>} Stored value
          */
         async get(key) {
-            if (server.isMaster) {
+            if (server.isPrimary) {
                 return store.get(key);
             } else {
                 return new Promise((resolve, reject) => {
@@ -118,7 +118,7 @@ export function init(server) {
          * @returns {Promise<boolean>} True if key existed and was deleted
          */
         async delete(key) {
-            if (server.isMaster) {
+            if (server.isPrimary) {
                 const result = store.delete(key);
                 emitter.emit(`delete:${key}`);
                 emitter.emit('delete', { key });
@@ -151,7 +151,7 @@ export function init(server) {
          * @returns {Promise<number>} Number of items in storage
          */
         async size() {
-            if (server.isMaster) return store.size;
+            if (server.isPrimary) return store.size;
             return new Promise((resolve, reject) => {
                 const messageId = uuid();
                 if (pendingPromises) {
@@ -170,7 +170,7 @@ export function init(server) {
          * @returns {Promise<boolean>}
          */
         async clear() {
-            if (server.isMaster) {
+            if (server.isPrimary) {
                 store.clear();
                 emitter.emit('clear');
                 server.send({

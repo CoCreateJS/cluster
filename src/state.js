@@ -65,7 +65,7 @@ export async function loadStateConfig() {
  * Registers process signal handlers (SIGINT, SIGTERM, SIGBREAK) and master/worker IPC event bindings.
  */
 function setupSignalHandlers() {
-    if (server?.isMaster) {
+    if (server?.isPrimary) {
         ['SIGINT', 'SIGTERM', 'SIGBREAK'].forEach((signal) => {
             process.on(signal, () => {
                 console.log(`\n[@cocreate/server] [MASTER] Received ${signal}. Orchestrating graceful shutdown...`);
@@ -118,9 +118,9 @@ export function getServerObject(data = {}) {
  * @param {string} [overrideStatus] - Optional status override (e.g. 'stopped', 'restarting')
  */
 export async function save(overrideStatus) {
-    if (server?.isMaster) {
+    if (server?.isPrimary) {
         const masterStatus = overrideStatus || (server.state?.isShuttingDown ? 'stopped' : 'running');
-        const isMasterStopped = masterStatus === 'stopped';
+        const isPrimaryStopped = masterStatus === 'stopped';
 
         const payloadData = {
             ip: server.ip,
@@ -129,7 +129,7 @@ export async function save(overrideStatus) {
             totalWorkers: server.totalWorkers,
             infrastructure: server.infrastructure,
             location: server.location,
-            master: isMasterStopped ? {
+            master: isPrimaryStopped ? {
                 pid: null,
                 status: 'stopped'
             } : {
@@ -140,7 +140,7 @@ export async function save(overrideStatus) {
 
         // If running in single-process mode, also record worker1 state in DB
         if (server.totalWorkers <= 1) {
-            payloadData.worker1 = isMasterStopped ? {
+            payloadData.worker1 = isPrimaryStopped ? {
                 pid: null,
                 status: 'stopped',
                 isCordoned: false,
@@ -206,7 +206,7 @@ export async function cordon(value = true, internalCall = false) {
         server.state.isCordon = isCordon;
     }
 
-    if (!server.isMaster) {
+    if (!server.isPrimary) {
         if (isCordon) {
             server.closeEdgeListeners();
         } else {
@@ -219,11 +219,11 @@ export async function cordon(value = true, internalCall = false) {
         evaluateMasterFallback();
     }
 
-    if (server.isMaster && !internalCall) {
+    if (server.isPrimary && !internalCall) {
         await save();
     }
     
-    const processLabel = server.isMaster ? `[MASTER] (${process.pid})` : `[WORKER] ${process.pid} (ID: ${server.workerId})`;
+    const processLabel = server.isPrimary ? `[MASTER] (${process.pid})` : `[WORKER] ${process.pid} (ID: ${server.workerId})`;
     console.log(`[@cocreate/server] ${processLabel} isCordon updated to: ${server?.state?.isCordon}`);
 }
 
@@ -262,7 +262,7 @@ export async function shed(arg, internalCall = false) {
 
     if (isShedding) {
         await cordon(true, true);
-        if (!server.isMaster && organizations.length > 0 && server.wsManager) {
+        if (!server.isPrimary && organizations.length > 0 && server.wsManager) {
             console.log(`[@cocreate/server] Selective eviction of org IDs:`, organizations);
             server.wsManager.destroyOrganizations(organizations);
         }
@@ -270,15 +270,15 @@ export async function shed(arg, internalCall = false) {
         await cordon(false, true);
     }
 
-    if (!server.isMaster && server.send) {
+    if (!server.isPrimary && server.send) {
         server.send({ method: 'worker_state_change', isShedding: server?.state?.isShedding });
     }
 
-    if (server.isMaster && !internalCall) {
+    if (server.isPrimary && !internalCall) {
         await save();
     }
 
-    const processLabel = server.isMaster ? `Master (${process.pid})` : `Worker ${process.pid} (ID: ${server.workerId})`;
+    const processLabel = server.isPrimary ? `Master (${process.pid})` : `Worker ${process.pid} (ID: ${server.workerId})`;
     console.log(`[@cocreate/server] ${processLabel} isShedding updated to: ${server?.state?.isShedding}`);
 }
 
@@ -305,7 +305,7 @@ export async function drain(value = true, internalCall = false) {
 
     if (isDraining) {
         await cordon(true, true);
-        if (!server.isMaster && server.wsManager) {
+        if (!server.isPrimary && server.wsManager) {
             console.log(`[@cocreate/server] Worker drain triggered. Purging websocket connections.`);
             server.wsManager.destroyAll();
         }
@@ -313,15 +313,15 @@ export async function drain(value = true, internalCall = false) {
         await cordon(false, true);
     }
 
-    if (!server.isMaster && server.send) {
+    if (!server.isPrimary && server.send) {
         server.send({ method: 'worker_state_change', isDraining: server?.state?.isDraining });
     }
 
-    if (server.isMaster && !internalCall) {
+    if (server.isPrimary && !internalCall) {
         await save();
     }
 
-    const processLabel = server.isMaster ? `Master (${process.pid})` : `Worker ${process.pid} (ID: ${server.workerId})`;
+    const processLabel = server.isPrimary ? `Master (${process.pid})` : `Worker ${process.pid} (ID: ${server.workerId})`;
     console.log(`[@cocreate/server] ${processLabel} isDraining updated to: ${server?.state?.isDraining}`);
 }
 
@@ -339,13 +339,13 @@ export async function restart(payload = {}, fromEvent = false) {
         return;
     }
 
-    if (server.isMaster) {
-        if (payload && (payload.isMaster || payload.master)) {
+    if (server.isPrimary) {
+        if (payload && (payload.isPrimary || payload.master)) {
             console.log(`[@cocreate/server] [MASTER] App restart commanded. Triggering global graceful shutdown...`);
             triggerGlobalShutdown('API_RESTART');
         }
     } else {
-        if (payload && (payload.isMaster || payload.master)) return;
+        if (payload && (payload.isPrimary || payload.master)) return;
 
         console.log(`[@cocreate/server] [WORKER ${server.workerId}] Restart triggered. Commencing drain...`);
         await save('restarting');
@@ -365,12 +365,12 @@ export function reboot(payload = {}, fromEvent = false) {
     if (!fromEvent) {
         const sendPayload = (payload && typeof payload === 'object') ? payload : {};
         sendPayload.method = 'reboot';
-        if (!server.isMaster) sendPayload.master = true;
+        if (!server.isPrimary) sendPayload.master = true;
         if (server.send) server.send(sendPayload);
         return;
     }
 
-    if (!server.isMaster) return;
+    if (!server.isPrimary) return;
 
     console.log(`[@cocreate/server] [MASTER] OS Reboot requested. Commencing graceful shutdown before kernel reboot...`);
     if (server.state) server.state.status = 'REBOOTING';
@@ -401,12 +401,12 @@ export function shutdown(payload = {}, fromEvent = false) {
     if (!fromEvent) {
         const sendPayload = (payload && typeof payload === 'object') ? payload : {};
         sendPayload.method = 'shutdown';
-        if (!server.isMaster) sendPayload.master = true;
+        if (!server.isPrimary) sendPayload.master = true;
         if (server.send) server.send(sendPayload);
         return;
     }
 
-    if (!server.isMaster) return;
+    if (!server.isPrimary) return;
 
     console.log(`[@cocreate/server] [MASTER] OS Shutdown requested. Commencing graceful shutdown before VM poweroff...`);
     if (server.state) server.state.status = 'STOPPED';
@@ -429,7 +429,7 @@ export function shutdown(payload = {}, fromEvent = false) {
  * @param {Function} [completionCallback] - Completion callback function
  */
 export async function triggerGlobalShutdown(reason, completionCallback) {
-    if (!server.isMaster || server.state?.isShuttingDown) return;
+    if (!server.isPrimary || server.state?.isShuttingDown) return;
 
     console.log(`\n[@cocreate/server] [MASTER] Commencing Global Shutdown Sequence (Reason: ${reason})...`);
     
@@ -507,7 +507,7 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
  * Evaluates active worker states and activates/deactivates emergency master fallback HTTP server.
  */
 export function evaluateMasterFallback() {
-    if (!server?.isMaster) return;
+    if (!server?.isPrimary) return;
 
     const workersList = server.workers ? Array.from(server.workers.values()) : [];
     const allWorkersDown = workersList.length === 0 || workersList.every(w => w.isListening === false);

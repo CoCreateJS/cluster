@@ -75,7 +75,7 @@ export async function loadLogConfig() {
  * Attaches IPC event listeners on the master process to receive logs from workers.
  */
 function setupIPCListeners() {
-    if (server?.isMaster) {
+    if (server?.isPrimary) {
         server.on('server.log', (message) => {
             if (message && message.log) {
                 handleIncomingWorkerLog(message.log);
@@ -144,7 +144,7 @@ function unpatchConsole() {
 export function log(level = 'info', message = '', metadata = null) {
     if (isLoggingInternal) return;
 
-    const sourceWorker = server?.isMaster ? 'master' : (server?.workerId || 1);
+    const sourceWorker = server?.isPrimary ? 'master' : (server?.workerId || 1);
 
     const logEntry = {
         timestamp: Date.now(),
@@ -154,7 +154,7 @@ export function log(level = 'info', message = '', metadata = null) {
         ...(metadata && typeof metadata === 'object' ? { metadata } : {})
     };
 
-    if (!server?.isMaster) {
+    if (!server?.isPrimary) {
         // Worker Process: Relay log entry to Master Orchestrator over IPC
         if (typeof server?.send === 'function') {
             server.send({
@@ -183,7 +183,7 @@ export function log(level = 'info', message = '', metadata = null) {
  * @param {Object} logEntry - Received log object
  */
 export function handleIncomingWorkerLog(logEntry) {
-    if (!server?.isMaster || !logEntry) return;
+    if (!server?.isPrimary || !logEntry) return;
     enqueueLog(logEntry);
 }
 
@@ -205,7 +205,7 @@ export function enqueueLog(logEntry) {
  * Configures interval timer for periodic buffer flushing on the master node.
  */
 function setupFlushTimer() {
-    if (!server?.isMaster) return;
+    if (!server?.isPrimary) return;
 
     if (flushTimer) {
         clearInterval(flushTimer);
@@ -224,7 +224,7 @@ function setupFlushTimer() {
  * Flushes pending log items from the queue to the database server object ring buffer.
  */
 export async function save() {
-    if (!server?.isMaster || logQueue.length === 0 || isLoggingInternal) return;
+    if (!server?.isPrimary || logQueue.length === 0 || isLoggingInternal) return;
 
     isLoggingInternal = true;
 
