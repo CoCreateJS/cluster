@@ -78,8 +78,8 @@ async function probeAWS() {
         provider: 'aws',
         region: doc.region,
         zone: doc.availabilityZone,
-        instanceId: doc.instanceId,
-        instanceType: doc.instanceType
+        vmId: doc.instanceId,
+        vmType: doc.instanceType
     };
 }
 
@@ -89,7 +89,7 @@ async function probeAWS() {
  */
 async function probeGCP() {
     const docStr = await request({
-        host: 'metadata.google.internal', 
+        host: 'metadata.google.internal',
         path: '/computeMetadata/v1/instance/?recursive=true',
         method: 'GET',
         headers: { 'Metadata-Flavor': 'Google' }
@@ -98,14 +98,14 @@ async function probeGCP() {
     const doc = JSON.parse(docStr);
     const zone = doc.zone ? doc.zone.split('/').pop() : 'unknown';
     const region = zone.slice(0, zone.lastIndexOf('-'));
-    const instanceType = doc.machineType ? doc.machineType.split('/').pop() : 'unknown';
+    const vmType = doc.machineType ? doc.machineType.split('/').pop() : 'unknown';
 
     return {
         provider: 'gcp',
         region,
         zone,
-        instanceId: doc.id ? String(doc.id) : 'unknown',
-        instanceType
+        vmId: doc.id ? String(doc.id) : 'unknown',
+        vmType
     };
 }
 
@@ -128,8 +128,8 @@ async function probeAzure() {
         provider: 'azure',
         region: compute.location || 'unknown',
         zone: compute.zone || 'unknown',
-        instanceId: compute.vmId || 'unknown',
-        instanceType: compute.vmSize || 'unknown'
+        vmId: compute.vmId || 'unknown',
+        vmType: compute.vmSize || 'unknown'
     };
 }
 
@@ -149,8 +149,8 @@ async function probeDigitalOcean() {
         provider: 'digitalocean',
         region: doc.region || 'unknown',
         zone: doc.region ? `${doc.region}-a` : 'unknown',
-        instanceId: doc.droplet_id ? String(doc.droplet_id) : 'unknown',
-        instanceType: doc.size || 'unknown'
+        vmId: doc.droplet_id ? String(doc.droplet_id) : 'unknown',
+        vmType: doc.size || 'unknown'
     };
 }
 
@@ -171,8 +171,8 @@ async function probeOCI() {
         provider: 'oracle',
         region: doc.region || 'unknown',
         zone: doc.faultDomain || 'unknown',
-        instanceId: doc.id || 'unknown',
-        instanceType: doc.shape || 'unknown'
+        vmId: doc.id || 'unknown',
+        vmType: doc.shape || 'unknown'
     };
 }
 
@@ -205,8 +205,8 @@ async function probeHetzner() {
         provider: 'hetzner',
         region,
         zone,
-        instanceId: meta['instance-id'] || 'unknown',
-        instanceType: 'cloud-vm' 
+        vmId: meta['instance-id'] || 'unknown',
+        vmType: 'cloud-vm'
     };
 }
 
@@ -231,8 +231,8 @@ async function probeVultr() {
         provider: 'vultr',
         region: 'vultr-global',
         zone: 'vultr-zone',
-        instanceId: idStr ? idStr.trim() : 'unknown',
-        instanceType: hostStr ? hostStr.trim() : 'vultr-instance'
+        vmId: idStr ? idStr.trim() : 'unknown',
+        vmType: hostStr ? hostStr.trim() : 'vultr-instance'
     };
 }
 
@@ -251,8 +251,8 @@ async function probeEquinix() {
         provider: 'equinix-metal',
         region: doc.metro || doc.facility || 'unknown',
         zone: doc.facility || 'unknown',
-        instanceId: doc.id || 'unknown',
-        instanceType: doc.plan || 'baremetal-metal'
+        vmId: doc.id || 'unknown',
+        vmType: doc.plan || 'baremetal-metal'
     };
 }
 
@@ -264,8 +264,8 @@ function resolveBareMetalIdentity() {
     try {
         if (fs.existsSync('/sys/class/dmi/id/product_name')) {
             const productName = fs.readFileSync('/sys/class/dmi/id/product_name', 'utf8').trim();
-            const vendorName = fs.existsSync('/sys/class/dmi/id/sys_vendor') 
-                ? fs.readFileSync('/sys/class/dmi/id/sys_vendor', 'utf8').trim() 
+            const vendorName = fs.existsSync('/sys/class/dmi/id/sys_vendor')
+                ? fs.readFileSync('/sys/class/dmi/id/sys_vendor', 'utf8').trim()
                 : 'BareMetal';
 
             let isVirtual = false;
@@ -281,8 +281,8 @@ function resolveBareMetalIdentity() {
                     provider: 'baremetal',
                     region: 'on-premise',
                     zone: 'on-premise-datacenter',
-                    instanceId: productName.replace(/\s+/g, '-').toLowerCase(),
-                    instanceType: `${vendorName}-${productName}`.replace(/\s+/g, '-').toLowerCase()
+                    vmId: productName.replace(/\s+/g, '-').toLowerCase(),
+                    vmType: `${vendorName}-${productName}`.replace(/\s+/g, '-').toLowerCase()
                 };
             }
         }
@@ -297,16 +297,16 @@ function resolveBareMetalIdentity() {
  * Dynamically resolves the host's physical infrastructure environment.
  * Runs exactly once during the server boot sequence. Guaranteed to never throw.
  * 
- * @param {string} masterInstanceId - The pre-configured fallback instance ID
+ * @param {string} masterVmId - The pre-configured fallback instance ID
  * @returns {Promise<Object>} Resolved server.infrastructure payload
  */
-export async function getInfrastructure(masterInstanceId) {
+export async function getInfrastructure(masterVmId) {
     const localFallback = {
         provider: 'local',
         region: 'local',
         zone: 'local',
-        instanceId: masterInstanceId,
-        instanceType: 'local'
+        vmId: masterVmId,
+        vmType: 'local'
     };
 
     try {
@@ -333,7 +333,7 @@ export async function getInfrastructure(masterInstanceId) {
         try {
             const bareMetalInfo = resolveBareMetalIdentity();
             if (bareMetalInfo) {
-                bareMetalInfo.instanceId = masterInstanceId;
+                bareMetalInfo.instanceId = masterVmId;
                 return bareMetalInfo;
             }
         } catch (err) {
@@ -346,8 +346,8 @@ export async function getInfrastructure(masterInstanceId) {
                 provider: process.env.PROVIDER,
                 region: process.env.REGION || 'unknown',
                 zone: process.env.ZONE || 'unknown',
-                instanceId: process.env.INSTANCE_ID || masterInstanceId,
-                instanceType: process.env.INSTANCE_TYPE || 'unknown'
+                vmId: process.env.VM_ID || masterVmId,
+                vmType: process.env.VM_TYPE || 'unknown'
             };
         }
 
