@@ -1,87 +1,88 @@
 {
-  "name": "@cocreate/server",
-  "version": "1.10.0",
-  "description": "A secure, stateless, clustered headless server built for high-performance multi-tenancy, real-time collaboration, and sandboxed AST execution.",
-  "keywords": [
-    "stateless-server",
-    "headless-architecture",
-    "realtime-collaboration",
-    "node-cluster",
-    "clustering-ipc",
-    "ast-flow-engine",
-    "multi-tenancy",
-    "websocket-server",
-    "dynamic-ssl-generation",
-    "acme-protocol",
-    "secure-connections",
-    "zero-dependency-policy",
-    "byodb",
-    "orchestration",
-    "web-security"
-  ],
-  "publishConfig": {
-    "access": "public"
-  },
-  "scripts": {
-    "start": "webpack --config webpack.config.js",
-    "build": "webpack --mode=production --config webpack.config.js",
-    "dev": "webpack --config webpack.config.js --watch"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/CoCreate-app/CoCreate-server.git"
-  },
-  "author": "CoCreate LLC",
-  "license": "AGPL-3.0",
-  "bugs": {
-    "url": "https://github.com/CoCreate-app/CoCreate-server/issues"
-  },
-  "homepage": "https://cocreate.app/docs/server",
-  "funding": {
-    "type": "GitHub Sponsors ❤",
-    "url": "https://github.com/sponsors/CoCreate-app"
-  },
-  "type": "module",
-  "main": "./src/index.js",
-  "exports": {
-    ".": "./src/index.js",
-    "./storage/amazon-redshift": "./storage/amazon-redshift.js",
-    "./storage/auroradb": "./storage/postgresql.js",
-    "./storage/cockroachdb": "./storage/postgresql.js",
-    "./storage/cosmosdb": "./storage/mongodb.js",
-    "./storage/documentdb": "./storage/mongodb.js",
-    "./storage/dqlite": "./storage/sqlite.js",
-    "./storage/dynamodb": "./storage/dynamodb.js",
-    "./storage/ferretdb": "./storage/mongodb.js",
-    "./storage/firestore": "./storage/firestore.js",
-    "./storage/mariadb": "./storage/mysql.js",
-    "./storage/mongodb": "./storage/mongodb.js",
-    "./storage/mysql": "./storage/mysql.js",
-    "./storage/oracledb": "./storage/mongodb.js",
-    "./storage/planetscale": "./storage/mysql.js",
-    "./storage/postgresql": "./storage/postgresql.js",
-    "./storage/qdrant": "./storage/qdrant.js",
-    "./storage/rqlite": "./storage/sqlite.js",
-    "./storage/sqlite": "./storage/sqlite.js",
-    "./storage/tidb": "./storage/mysql.js",
-    "./storage/timescaledb": "./storage/postgresql.js",
-    "./storage/turso": "./storage/sqlite.js",
-    "./storage/yugabytedb": "./storage/postgresql.js"
-  },
-  "dependencies": {
-    "@cocreate/authenticate": "^1.16.0",
-    "@cocreate/authorize": "^1.20.0",
-    "@cocreate/config": "^1.19.0",
-    "@cocreate/cron-jobs": "^1.8.0",
-    "@cocreate/crud-server": "^1.41.0",
-    "@cocreate/file-server": "^1.24.0",
-    "@cocreate/lazy-loader": "^1.29.0",
-    "@cocreate/server-autoscaler": "^1.4.0",
-    "@cocreate/server-mesh": "^1.6.0",
-    "@cocreate/server-telemetry": "^1.20.0",
-    "@cocreate/server-tls": "^1.11.0",
-    "@cocreate/socket-server": "^1.35.2",
-    "@cocreate/usage": "^1.7.0",
-    "@cocreate/utils": "^1.52.0"
-  }
+    "name": "@cocreate/server",
+    "version": "1.10.0",
+    "description": "A secure, stateless, clustered headless server built for high-performance multi-tenancy, real-time collaboration, and sandboxed AST execution.",
+    "keywords": [
+        "stateless-server",
+        "headless-architecture",
+        "realtime-collaboration",
+        "node-cluster",
+        "clustering-ipc",
+        "ast-flow-engine",
+        "multi-tenancy",
+        "websocket-server",
+        "dynamic-ssl-generation",
+        "acme-protocol",
+        "secure-connections",
+        "zero-dependency-policy",
+        "byodb",
+        "orchestration",
+        "web-security"
+    ],
+    "publishConfig": {
+        "access": "public"
+    },
+    "scripts": {
+        "start": "webpack --config webpack.config.js",
+        "build": "webpack --mode=production --config webpack.config.js",
+        "dev": "webpack --config webpack.config.js --watch"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/CoCreate-app/CoCreate-server.git"
+    },
+    "author": "CoCreate LLC",
+    "license": "AGPL-3.0",
+    "bugs": {
+        "url": "https://github.com/CoCreate-app/CoCreate-server/issues"
+    },
+    "homepage": "https://cocreate.app/docs/server",
+    "funding": {
+        "type": "GitHub Sponsors ❤",
+        "url": "https://github.com/sponsors/CoCreate-app"
+    },
+    "type": "module",
+    "main": "./src/index.js",
+    "exports": {
+        ".": "./src/index.js",
+        "./storage/amazon-redshift": "./storage/amazon-redshift.js",
+        "./storage/auroradb": "./storage/postgresql.js",
+        "./storage/cockroachdb": "./storage/postgresql.js",
+        "./storage/cosmosdb": "./storage/mongodb.js",
+        "./storage/documentdb": "./storage/mongodb.js",
+        "./storage/dqlite": "./storage/sqlite.js",
+        "./storage/dynamodb": "./storage/dynamodb.js",
+        "./storage/ferretdb": "./storage/mongodb.js",
+        "./storage/firestore": "./storage/firestore.js",
+        "./storage/mariadb": "./storage/mysql.js",
+        "./storage/mongodb": "./storage/mongodb.js",
+        "./storage/mysql": "./storage/mysql.js",
+        "./storage/oracledb": "./storage/mongodb.js",
+        "./storage/planetscale": "./storage/mysql.js",
+        "./storage/postgresql": "./storage/postgresql.js",
+        "./storage/qdrant": "./storage/qdrant.js",
+        "./storage/rqlite": "./storage/sqlite.js",
+        "./storage/sqlite": "./storage/sqlite.js",
+        "./storage/tidb": "./storage/mysql.js",
+        "./storage/timescaledb": "./storage/postgresql.js",
+        "./storage/turso": "./storage/sqlite.js",
+        "./storage/yugabytedb": "./storage/postgresql.js"
+    },
+    "dependencies": {
+        "@cocreate/api": "^1.31.0",
+        "@cocreate/authenticate": "^1.16.0",
+        "@cocreate/authorize": "^1.20.0",
+        "@cocreate/config": "^1.19.0",
+        "@cocreate/cron-jobs": "^1.8.0",
+        "@cocreate/crud-server": "^1.41.0",
+        "@cocreate/file-server": "^1.24.0",
+        "@cocreate/lazy-loader": "^1.29.0",
+        "@cocreate/server-autoscaler": "^1.4.0",
+        "@cocreate/server-mesh": "^1.6.0",
+        "@cocreate/server-telemetry": "^1.20.0",
+        "@cocreate/server-tls": "^1.11.0",
+        "@cocreate/socket-server": "^1.35.2",
+        "@cocreate/usage": "^1.7.0",
+        "@cocreate/utils": "^1.52.0"
+    }
 }
