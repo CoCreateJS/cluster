@@ -39,6 +39,23 @@ function resolvePending(pendingPromises, message) {
     return true;
 }
 
+function normalizeBroadcast(payload) {
+    if (payload.broadcast === 'false') payload.broadcast = false;
+}
+
+function isOrganizationDelivery(payload) {
+    return Boolean(
+        payload.organization_id &&
+        payload.response !== true
+    );
+}
+
+function includesTarget(target, value) {
+    if (target === undefined) return true;
+    const targets = Array.isArray(target) ? target : [target];
+    return targets.some(item => String(item) === String(value));
+}
+
 /**
  * Initializes Inter-Process Communication (IPC) transport routing between 
  * the Master orchestrator and clustered Worker processes.
@@ -94,6 +111,7 @@ export function init(Server, pendingPromises) {
 
         cluster.on('message', async (worker, message) => {
             if (!message || typeof message !== 'object') return;
+            normalizeBroadcast(message);
 
             // Only the process that originated this UUID can own its Promise.
             if (resolvePending(pendingPromises, message)) return;
@@ -104,6 +122,7 @@ export function init(Server, pendingPromises) {
             if (message.serverId === undefined) {
                 message.serverId = Server.id;
             }
+            message.status = 'sent';
 
             if (message.method === 'registerOrg') {
                 updateOrganizationWorker(message);
@@ -130,7 +149,7 @@ export function init(Server, pendingPromises) {
                 message.worker ||
                 message.server !== undefined ||
                 message.cluster !== undefined ||
-                (message.organization_id && message.broadcast !== false) ||
+                message.organization_id ||
                 message.response === true
             ) {
                 route(message);
@@ -139,19 +158,23 @@ export function init(Server, pendingPromises) {
 
         function route(payload = {}) {
             if (!payload || typeof payload !== 'object') return;
-            if (payload.id === undefined) payload.id = Server.id;
+            normalizeBroadcast(payload);
 
-            const organizationBroadcast =
-                payload.organization_id &&
-                payload.broadcast !== false &&
-                payload.worker === undefined &&
-                payload.server === undefined &&
-                payload.cluster === undefined &&
-                payload.response !== true;
+            const organizationDelivery = isOrganizationDelivery(payload);
+            const targetsCurrentServer =
+                includesTarget(payload.server, Server.id) &&
+                includesTarget(payload.cluster, Server.cluster_id);
+            const targetsRemoteServer =
+                payload.server === undefined ||
+                (Array.isArray(payload.server)
+                    ? payload.server
+                    : [payload.server]
+                ).some(serverId => String(serverId) !== String(Server.id));
 
             if (
-                !payload.meshReceived &&
-                (organizationBroadcast ||
+                payload.serverId === Server.id &&
+                targetsRemoteServer &&
+                (organizationDelivery ||
                     payload.server !== undefined ||
                     payload.cluster !== undefined) &&
                 Server.mesh &&
@@ -162,17 +185,31 @@ export function init(Server, pendingPromises) {
 
             const targetWorkers = [];
 
-            if (payload.worker) {
+            if (targetsCurrentServer && payload.worker) {
+                const organizationWorkerIds = payload.organization_id
+                    ? organizationWorkers.get(payload.organization_id) || new Set()
+                    : null;
                 if (Array.isArray(payload.worker)) {
                     for (const wId of payload.worker) {
+                        if (
+                            organizationWorkerIds &&
+                            !includesTarget([...organizationWorkerIds], wId)
+                        ) continue;
                         const w = Server.workers.get(wId);
                         if (w) targetWorkers.push(w);
                     }
                 } else {
+                    if (
+                        organizationWorkerIds &&
+                        !includesTarget(
+                            [...organizationWorkerIds],
+                            payload.worker
+                        )
+                    ) return;
                     const w = Server.workers.get(payload.worker);
                     if (w) targetWorkers.push(w);
                 }
-            } else if (organizationBroadcast) {
+            } else if (targetsCurrentServer && organizationDelivery) {
                 const workerIds = organizationWorkers.get(
                     payload.organization_id
                 ) || [];
@@ -180,8 +217,7 @@ export function init(Server, pendingPromises) {
                     const worker = Server.workers.get(workerId);
                     if (worker) targetWorkers.push(worker);
                 }
-            } else {
-                // Broadcast to all workers by default if no specific worker specified
+            } else if (targetsCurrentServer && payload.broadcast) {
                 for (const w of Server.workers.values()) {
                     targetWorkers.push(w);
                 }
@@ -189,7 +225,7 @@ export function init(Server, pendingPromises) {
 
             const filteredWorkers = targetWorkers.filter((workerObj) => {
                 if (
-                    organizationBroadcast &&
+                    organizationDelivery &&
                     payload.serverId === Server.id &&
                     payload.workerId === workerObj.id
                 ) return false;
@@ -221,11 +257,7 @@ export function init(Server, pendingPromises) {
                 const workerProcess = workerObj.process || workerObj;
                 if (workerProcess && typeof workerProcess.send === 'function' && workerProcess.isConnected()) {
                     try {
-                        workerProcess.send(
-                            organizationBroadcast
-                                ? { ...payload, socketDelivery: true }
-                                : payload
-                        );
+                        workerProcess.send(payload);
                     } catch (err) {
                         console.error(`[@cocreate/server] [MASTER] Failed to send IPC payload to worker ${workerObj.id}:`, err.message);
                     }
@@ -233,14 +265,13 @@ export function init(Server, pendingPromises) {
             }
 
             if (
-                organizationBroadcast &&
+                organizationDelivery &&
                 Server.isWorker &&
                 Server.wsManager &&
                 !(payload.serverId === Server.id &&
                     payload.workerId === Server.workerId)
             ) {
                 const data = { ...payload, serverSent: true };
-                delete data.meshReceived;
                 Server.wsManager.send(data);
             }
 
@@ -248,10 +279,13 @@ export function init(Server, pendingPromises) {
 
         return function send(payload = {}) {
             if (!payload || typeof payload !== 'object') return Promise.resolve(payload);
+            normalizeBroadcast(payload);
 
             if (!payload.uuid) payload.uuid = uuid();
-            if (payload.serverId === undefined) payload.serverId = Server.id;
-            if (payload.workerId === undefined) payload.workerId = null;
+            if (payload.serverId === undefined) {
+                payload.serverId = Server.id;
+                payload.status = 'sent';
+            }
 
             if (payload.method === 'registerOrg') {
                 updateOrganizationWorker(payload);
@@ -271,7 +305,7 @@ export function init(Server, pendingPromises) {
             const response = new Promise((resolve, reject) => {
                 if (
                     !isResponse &&
-                    payload.broadcast === false &&
+                    !payload.broadcast &&
                     payload.broadcastSender === true
                 ) {
                     pendingPromises.set(payload.uuid, { resolve, reject });
@@ -300,10 +334,8 @@ export function init(Server, pendingPromises) {
 
             if (resolvePending(pendingPromises, message)) return;
 
-            if (message.socketDelivery && Server.wsManager) {
+            if (isOrganizationDelivery(message) && Server.wsManager) {
                 const data = { ...message, serverSent: true };
-                delete data.socketDelivery;
-                delete data.meshReceived;
                 Server.wsManager.send(data);
                 return;
             }
@@ -315,22 +347,25 @@ export function init(Server, pendingPromises) {
 
         return function send(payload = {}) {
             if (!payload || typeof payload !== 'object') return Promise.resolve(payload);
+            normalizeBroadcast(payload);
 
             if (!payload.uuid) payload.uuid = uuid();
-            if (payload.serverId === undefined) payload.serverId = Server.id;
-            if (payload.workerId === undefined) payload.workerId = Server.workerId;
+            if (
+                payload.serverId === undefined &&
+                payload.workerId === undefined
+            ) {
+                payload.workerId = Server.workerId;
+            }
 
             const isResponse = payload.response === true;
             if (isResponse) {
                 payload.worker = payload.workerId;
                 payload.master = payload.workerId == null;
             }
-            if (payload.id === undefined) payload.id = Server.id;
-
             const response = new Promise((resolve, reject) => {
                 if (
                     !isResponse &&
-                    payload.broadcast === false &&
+                    !payload.broadcast &&
                     payload.broadcastSender === true
                 ) {
                     pendingPromises.set(payload.uuid, { resolve, reject });
