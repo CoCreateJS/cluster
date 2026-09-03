@@ -254,9 +254,14 @@ Multiple workers:
 ```javascript
 server.send({
 	method: "drain",
-	workers: [1, 3]
+	worker: [1, 3]
 });
 ```
+
+Messages carrying `organization_id` are routed only to workers currently serving
+that organization and through mesh sockets connected on that organization's URL
+path. IPC owns the local organization-to-worker map. The originating `workerId`
+and `serverId` are retained so the source worker is excluded from duplicate delivery.
 
 ---
 

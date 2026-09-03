@@ -17,37 +17,68 @@
  ********************************************************************************/
 
 import { EventEmitter } from 'node:events';
-import { uuid } from '@cocreate/utils';
-
 /**
- * Initializes distributed storage for cluster workers and returns a clean API object.
+ * Initializes primary-owned shared storage and a worker IPC proxy API.
  * 
  * @param {Object} server - Core server context instance
  * @returns {Object} Clean storage API instance
  */
 export function init(server) {
-    const store = new Map();
+    const store = server.isPrimary ? new Map() : null;
     const emitter = new EventEmitter();
-    const workerId = server?.workerId || 1;
-    const pendingPromises = server?.cluster?.pendingPromises;
 
-    if (server && !server.isPrimary) {
-        server.on('cluster_state_sync', (payload) => {
-            if (payload && payload.key !== undefined) {
-                if (payload.value === undefined) {
-                    store.delete(payload.key);
-                    emitter.emit(`delete:${payload.key}`);
-                    emitter.emit('delete', { key: payload.key });
-                } else {
-                    store.set(payload.key, payload.value);
-                    emitter.emit(`change:${payload.key}`, payload.value);
-                    emitter.emit('change', { key: payload.key, value: payload.value });
-                }
-            } else if (payload && payload.clear) {
-                store.clear();
-                emitter.emit('clear');
-            }
+    async function request(method, data = {}) {
+        const response = await server.send({
+            method,
+            ...data,
+            master: true,
+            broadcast: false,
+            broadcastSender: true
         });
+        return response.result;
+    }
+
+    async function respond(payload, operation) {
+        if (payload.broadcastSender === false) return;
+
+        try {
+            const result = await operation();
+            await server.send({
+                ...payload,
+                response: true,
+                success: true,
+                result
+            });
+        } catch (error) {
+            await server.send({
+                ...payload,
+                response: true,
+                success: false,
+                error: error.message
+            });
+        }
+    }
+
+    if (server.isPrimary) {
+        server.on('storage.set', payload => respond(payload, () => {
+            store.set(payload.key, payload.value);
+            emitter.emit(`change:${payload.key}`, payload.value);
+            emitter.emit('change', { key: payload.key, value: payload.value });
+            return true;
+        }));
+        server.on('storage.get', payload => respond(payload, () => store.get(payload.key)));
+        server.on('storage.delete', payload => respond(payload, () => {
+            const result = store.delete(payload.key);
+            emitter.emit(`delete:${payload.key}`);
+            emitter.emit('delete', { key: payload.key });
+            return result;
+        }));
+        server.on('storage.size', payload => respond(payload, () => store.size));
+        server.on('storage.clear', payload => respond(payload, () => {
+            store.clear();
+            emitter.emit('clear');
+            return true;
+        }));
     }
 
     const storageAPI = {
@@ -55,37 +86,16 @@ export function init(server) {
          * Sets a key-value pair in cluster storage.
          * @param {string} key - Storage key
          * @param {*} value - Storage value
-         * @returns {Promise<boolean>} Resolves when state is set or synced
+         * @returns {Promise<boolean>} Resolves when the primary stores the value
          */
         async set(key, value) {
             if (server.isPrimary) {
                 store.set(key, value);
                 emitter.emit(`change:${key}`, value);
                 emitter.emit('change', { key, value });
-
-                server.send({
-                    method: 'cluster_state_sync',
-                    key,
-                    value,
-                    broadcast: true,
-                    master: false
-                });
                 return true;
-            } else {
-                return new Promise((resolve, reject) => {
-                    const messageId = uuid();
-                    if (pendingPromises) {
-                        pendingPromises.set(messageId, { resolve, reject });
-                    }
-                    server.send({
-                        workerId,
-                        messageId,
-                        method: 'cluster_state_set',
-                        key,
-                        value
-                    });
-                });
             }
+            return request('storage.set', { key, value });
         },
 
         /**
@@ -94,22 +104,8 @@ export function init(server) {
          * @returns {Promise<*>} Stored value
          */
         async get(key) {
-            if (server.isPrimary) {
-                return store.get(key);
-            } else {
-                return new Promise((resolve, reject) => {
-                    const messageId = uuid();
-                    if (pendingPromises) {
-                        pendingPromises.set(messageId, { resolve, reject });
-                    }
-                    server.send({
-                        workerId,
-                        messageId,
-                        method: 'cluster_state_get',
-                        key
-                    });
-                });
-            }
+            if (server.isPrimary) return store.get(key);
+            return request('storage.get', { key });
         },
 
         /**
@@ -122,28 +118,9 @@ export function init(server) {
                 const result = store.delete(key);
                 emitter.emit(`delete:${key}`);
                 emitter.emit('delete', { key });
-                server.send({
-                    method: 'cluster_state_sync',
-                    key,
-                    value: undefined,
-                    broadcast: true,
-                    master: false
-                });
                 return result;
-            } else {
-                return new Promise((resolve, reject) => {
-                    const messageId = uuid();
-                    if (pendingPromises) {
-                        pendingPromises.set(messageId, { resolve, reject });
-                    }
-                    server.send({
-                        workerId,
-                        messageId,
-                        method: 'cluster_state_delete',
-                        key
-                    });
-                });
             }
+            return request('storage.delete', { key });
         },
 
         /**
@@ -152,17 +129,7 @@ export function init(server) {
          */
         async size() {
             if (server.isPrimary) return store.size;
-            return new Promise((resolve, reject) => {
-                const messageId = uuid();
-                if (pendingPromises) {
-                    pendingPromises.set(messageId, { resolve, reject });
-                }
-                server.send({
-                    workerId,
-                    messageId,
-                    method: 'cluster_state_size'
-                });
-            });
+            return request('storage.size');
         },
 
         /**
@@ -173,26 +140,9 @@ export function init(server) {
             if (server.isPrimary) {
                 store.clear();
                 emitter.emit('clear');
-                server.send({
-                    method: 'cluster_state_sync',
-                    clear: true,
-                    broadcast: true,
-                    master: false
-                });
                 return true;
-            } else {
-                return new Promise((resolve, reject) => {
-                    const messageId = uuid();
-                    if (pendingPromises) {
-                        pendingPromises.set(messageId, { resolve, reject });
-                    }
-                    server.send({
-                        workerId,
-                        messageId,
-                        method: 'cluster_state_clear'
-                    });
-                });
             }
+            return request('storage.clear');
         },
 
         /**
