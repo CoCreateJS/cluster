@@ -520,7 +520,7 @@ export function evaluateMasterFallback() {
             const BIND_IP = process.env.BIND_IP || '0.0.0.0';
 
             const handleFallback = (req, res) => {
-                res.writeHead(500, { 
+                res.writeHead(503, {
                     "Content-Type": "text/plain",
                     "Retry-After": "5"
                 });
