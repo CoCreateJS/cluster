@@ -183,6 +183,33 @@ export function init(Server, pendingPromises) {
                 Server.mesh.send(payload);
             }
 
+            const isMasterControl =
+                payload.method === 'restart' ||
+                payload.method === 'reboot' ||
+                payload.method === 'shutdown';
+            if (
+                isMasterControl &&
+                payload.master === true &&
+                Server.isPrimary &&
+                targetsCurrentServer
+            ) {
+                Server.emit(payload.method, payload);
+                return;
+            }
+
+            const isWorkerControl =
+                payload.method === 'cordon' ||
+                payload.method === 'shed' ||
+                payload.method === 'drain';
+            if (
+                isWorkerControl &&
+                Server.isWorker &&
+                targetsCurrentServer &&
+                includesTarget(payload.worker, Server.workerId)
+            ) {
+                Server.emit(payload.method, payload);
+            }
+
             const targetWorkers = [];
 
             if (targetsCurrentServer && payload.worker) {
@@ -333,6 +360,15 @@ export function init(Server, pendingPromises) {
             if (!message || typeof message !== 'object') return;
 
             if (resolvePending(pendingPromises, message)) return;
+
+            if (
+                message.method === 'cordon' ||
+                message.method === 'shed' ||
+                message.method === 'drain'
+            ) {
+                Server.emit(message.method, message);
+                return;
+            }
 
             if (isOrganizationDelivery(message) && Server.wsManager) {
                 const data = { ...message, serverSent: true };

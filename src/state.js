@@ -563,6 +563,15 @@ export async function init(serverInstance) {
     await loadStateConfig();
     setupSignalHandlers();
 
+    server.on('cordon', payload => cordon(payload));
+    server.on('shed', payload => shed(payload));
+    server.on('drain', payload => drain(payload));
+    server.on('restart', payload => restart(payload, true));
+    if (server.isPrimary) {
+        server.on('reboot', payload => reboot(payload, true));
+        server.on('shutdown', payload => shutdown(payload, true));
+    }
+
     return {
         config: stateConfig,
         status: 'RUNNING',

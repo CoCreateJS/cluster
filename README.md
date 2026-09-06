@@ -121,7 +121,7 @@ Every server instance extends Node.js `EventEmitter`.
 | `totalWorkers` | Number of workers |
 | `state` | Current server state |
 | `storage` / `store` | Reactive cluster storage |
-| `send()` | IPC message dispatcher |
+| `send()` | Server-side IPC and mesh message dispatcher |
 
 ### Status Events
 
@@ -135,45 +135,45 @@ server.on("status_change", ({ oldStatus, newStatus }) => {
 
 ## Ingress & Connection Controls
 
-### `server.cordon(value)`
+### `server.state.cordon(value)`
 
 Enable or disable maintenance mode.
 
 ```javascript
-server.cordon(true);
+await server.state.cordon(true);
 
 server.emit("cordon", {
 	value: true
 });
 
-server.cordon(false);
+await server.state.cordon(false);
 ```
 
 ---
 
-### `server.shed(organizations)`
+### `server.state.shed(organizations)`
 
 Drain selected organizations.
 
 ```javascript
-server.shed([
+await server.state.shed([
 	"org_abc123",
 	"org_xyz789"
 ]);
 
-server.shed(false);
+await server.state.shed(false);
 ```
 
 ---
 
-### `server.drain(value)`
+### `server.state.drain(value)`
 
 Gracefully disconnect active clients.
 
 ```javascript
-server.drain(true);
+await server.state.drain(true);
 
-server.drain(false);
+await server.state.drain(false);
 ```
 
 ---
@@ -183,9 +183,9 @@ server.drain(false);
 ### Restart
 
 ```javascript
-server.restart();
+server.state.restart();
 
-server.restart({
+server.state.restart({
 	isPrimary: true
 });
 ```
@@ -207,7 +207,7 @@ Primary restart:
 ### Reboot
 
 ```javascript
-server.reboot();
+server.state.reboot();
 ```
 
 Gracefully reboots the operating system after draining connections.
@@ -217,7 +217,7 @@ Gracefully reboots the operating system after draining connections.
 ### Shutdown
 
 ```javascript
-server.shutdown();
+server.state.shutdown();
 ```
 
 Gracefully powers off the machine after draining connections.
@@ -226,7 +226,34 @@ Gracefully powers off the machine after draining connections.
 
 ## IPC Transport Engine
 
-The IPC subsystem synchronizes Primary and Worker processes.
+The IPC subsystem synchronizes Primary and Worker processes and routes messages
+to peer servers through the server mesh. `server.send()` is the server-side
+transport. A browser does not call this function directly: it calls
+`CoCreate.socket.send()` with the same envelope, and the receiving socket server
+passes that envelope into `server.send()` when server routing is required.
+
+Browser to server/worker:
+
+```javascript
+await CoCreate.socket.send({
+	method: "cordon",
+	server: "server_b_id",
+	worker: 2,
+	value: true
+});
+```
+
+The message follows this path:
+
+```text
+CoCreate.socket.send(data)
+    -> socket server
+    -> server.send(data)
+    -> Primary IPC / server mesh
+    -> targeted worker event
+```
+
+Inside a server process, use `server.send()` directly.
 
 Broadcast:
 
@@ -258,10 +285,78 @@ server.send({
 });
 ```
 
+Worker control messages use the same envelope:
+
+```javascript
+// Allow or prevent new traffic on one worker.
+server.send({
+	method: "cordon",
+	server: "server_b_id",
+	worker: 2,
+	value: true
+});
+
+// Drain a worker's active connections and cordon it.
+server.send({
+	method: "drain",
+	server: "server_b_id",
+	worker: 2,
+	value: true
+});
+
+// Shed selected organizations from a worker.
+server.send({
+	method: "shed",
+	server: "server_b_id",
+	worker: 2,
+	organizations: ["org_abc123"]
+});
+
+// Stop shedding and allow the worker to accept traffic again.
+server.send({
+	method: "shed",
+	server: "server_b_id",
+	worker: 2,
+	organizations: false
+});
+```
+
+Primary process and host lifecycle controls target `master: true`:
+
+```javascript
+server.send({
+	method: "restart",
+	server: "server_b_id",
+	master: true
+});
+
+server.send({
+	method: "reboot",
+	server: "server_b_id",
+	master: true
+});
+
+server.send({
+	method: "shutdown",
+	server: "server_b_id",
+	master: true
+});
+```
+
+`restart` restarts the server application. `reboot` and `shutdown` operate on
+the host and therefore should be exposed only through an authorized control
+surface with explicit confirmation.
+
+`server`, `cluster`, and `worker` accept either one value or an array of values.
+Broadcasting is opt-in: set `broadcast: true` only when a message should reach
+all eligible targets. An explicit `worker` target takes precedence over
+broadcast worker selection.
+
 Messages carrying `organization_id` are routed only to workers currently serving
 that organization and through mesh sockets connected on that organization's URL
-path. IPC owns the local organization-to-worker map. The originating `workerId`
-and `serverId` are retained so the source worker is excluded from duplicate delivery.
+path. The field is a routing scope, not a request to broadcast. IPC owns the local
+organization-to-worker map. The originating `workerId` and `serverId` are retained
+as lifecycle metadata so messages can be routed without duplicate execution.
 
 ---
 
