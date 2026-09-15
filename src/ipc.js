@@ -309,6 +309,13 @@ export function init(Server, pendingPromises) {
             normalizeBroadcast(payload);
 
             if (!payload.uuid) payload.uuid = uuid();
+            if (
+                Server.isWorker &&
+                payload.serverId === undefined &&
+                payload.workerId === undefined
+            ) {
+                payload.workerId = Server.workerId;
+            }
             if (payload.serverId === undefined) {
                 payload.serverId = Server.id;
                 payload.status = 'sent';

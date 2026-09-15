@@ -17,6 +17,34 @@ function createWorker(id, received) {
     };
 }
 
+test('a primary serving as a worker stamps its origin before mesh delivery', async () => {
+    const received = [];
+    const server = {
+        id: 'server-1',
+        isPrimary: true,
+        isWorker: true,
+        workerId: 1,
+        workers: new Map(),
+        mesh: { send: payload => received.push({ ...payload }) },
+        emit: () => {}
+    };
+    const send = IPC.init(server, new Map());
+
+    await send({ method: 'example.changed', organization_id: 'org-1' });
+    assert.equal(received.length, 1);
+    assert.equal(received[0].workerId, 1);
+    assert.equal(received[0].serverId, 'server-1');
+
+    const remote = await send({
+        method: 'example.changed',
+        organization_id: 'org-1',
+        serverId: 'server-2',
+        workerId: 7
+    });
+    assert.equal(remote.workerId, 7);
+    assert.equal(remote.serverId, 'server-2');
+});
+
 test('server.send stores a Promise only at the UUID origin', async () => {
     const received = [];
     const emitted = [];
