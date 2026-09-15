@@ -457,6 +457,27 @@ export class CoCreateServer {
             const rawUrl = req.url || '/';
             const [reqPath] = rawUrl.split('?');
 
+            if (
+                !reqPath.startsWith('/.well-known/acme-challenge/') &&
+                this.tls?.checkOrganizationAccess
+            ) {
+                const access = await this.tls.checkOrganizationAccess(req.headers.host);
+                if (access.allowed === false) {
+                    res.writeHead(402, {
+                        'Content-Type': 'application/json; charset=utf-8',
+                        'Cache-Control': 'no-store',
+                        'Account-Balance': 'false'
+                    });
+                    res.end(JSON.stringify({
+                        error: 'Organization balance depleted',
+                        organizationBalance: false,
+                        balance: access.balance,
+                        currency: access.currency
+                    }));
+                    return;
+                }
+            }
+
             // 1. Direct O(1) exact match lookup or directory/wildcard pattern matching in this.routes Map
             let handler = this.routes.get(reqPath);
 
