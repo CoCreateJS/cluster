@@ -112,6 +112,40 @@ export function getServerObject(data = {}) {
     };
 }
 
+const wait = (milliseconds) => new Promise((resolve) =>
+    setTimeout(resolve, milliseconds)
+);
+
+async function persistLifecycle(payload, attempts = 5) {
+    let lastError;
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        try {
+            const response = await server.crud.send(payload);
+            const errors = Array.isArray(response?.error)
+                ? response.error
+                : response?.error
+                    ? [response.error]
+                    : [];
+
+            if (!errors.length) return response;
+            lastError = new Error(errors
+                .map((error) => error?.message || String(error))
+                .join('; '));
+        } catch (error) {
+            lastError = error;
+        }
+
+        if (attempt < attempts) await wait(250 * (2 ** (attempt - 1)));
+    }
+
+    console.error(
+        `[@cocreate/server] Failed to persist lifecycle state after ${attempts} attempts:`,
+        lastError?.message || lastError
+    );
+    return null;
+}
+
 /**
  * Synchronizes process status and active cluster state flags to the database server object.
  * 
@@ -157,9 +191,7 @@ export async function save(overrideStatus) {
 
         const payload = getServerObject(payloadData);
 
-        if (server.crud) {
-            await server.crud.send(payload);
-        }
+        if (server.crud) return await persistLifecycle(payload);
     } else if (server) {
         const dbStatus = overrideStatus || (server.state?.isShuttingDown ? 'stopped' : 'running');
         const isStopped = dbStatus === 'stopped';
@@ -180,9 +212,7 @@ export async function save(overrideStatus) {
             }
         });
 
-        if (server.crud) {
-            await server.crud.send(payload);
-        }
+        if (server.crud) return await persistLifecycle(payload);
     }
 }
 

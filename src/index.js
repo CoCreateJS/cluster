@@ -119,6 +119,17 @@ export class ClusterManager {
                     if (this.server.state?.evaluateMasterFallback) {
                         this.server.state.evaluateMasterFallback();
                     }
+
+                    const workersReady = this.workers.size === this.totalWorkers &&
+                        [...this.workers.values()].every((item) => item.isListening);
+                    if (workersReady && this.server.state?.save) {
+                        this.server.state.save('running').catch((error) => {
+                            console.error(
+                                '[@cocreate/server] Failed to publish master readiness:',
+                                error.message
+                            );
+                        });
+                    }
                 }
             }
         };
