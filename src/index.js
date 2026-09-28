@@ -244,7 +244,7 @@ export class CoCreateServer {
 
         // Initialize reactive cluster storage bound to cluster IPC promises
         this.storage = Storage.init(this, this.cluster.pendingPromises);
-        this.authenticate = authenticate;
+        this.authenticate = authenticate.init(this);
         this.authorize = authorize;
     }
 
@@ -317,6 +317,7 @@ export class CoCreateServer {
         this.cluster.configureWorkers(config.workers);
 
         this.crud = await CrudServer.init(this);
+        this.authenticate = authenticate.init(this);
         this.mesh = ServerMesh;
 
         if (this.isPrimary) {
