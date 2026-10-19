@@ -332,24 +332,44 @@ export class CoCreateServer {
             // Reset logs array for a fresh logging session on master startup
             await this.crud.send(this.state.getServerObject({ logs: [] }));
 
-            // Register initial running profile to DB for Master
-            await this.state.save('running');
-
-            // Zero-out worker states in DB upon master initialization
-            if (this.totalWorkers > 0) {
-                const initialWorkerStates = {};
-                for (let i = 1; i <= this.totalWorkers; i++) {
-                    initialWorkerStates[`worker${i}`] = {
-                        pid: null,
-                        status: 'stopped',
-                        isCordoned: false,
-                        isShedding: false,
-                        isDraining: false
-                    };
-                }
-
-                await this.crud.send(this.state.getServerObject(initialWorkerStates));
+            // Replace the persisted worker profile before the new workers start.
+            const workerCount = Math.max(1, this.totalWorkers);
+            const initialWorkerStates = { totalWorkers: this.totalWorkers };
+            for (let i = 1; i <= workerCount; i++) {
+                initialWorkerStates[`worker${i}`] = {
+                    pid: null,
+                    status: 'stopped',
+                    isCordoned: false,
+                    isShedding: false,
+                    isDraining: false
+                };
             }
+
+            try {
+                const response = await this.crud.send({
+                    method: 'object.read',
+                    array: 'servers',
+                    filter: { query: { _id: this.id }, limit: 1 },
+                    organization_id: this.organization_id,
+                    host: this.host
+                });
+                if (response?.error?.length || (response?.error && !Array.isArray(response.error)) ||
+                    !Array.isArray(response?.object))
+                    throw new Error('Unable to read the previous worker profile.');
+
+                for (const field of Object.keys(response?.object?.[0] || {})) {
+                    const match = /^worker([1-9]\d*)$/.exec(field);
+                    if (match && Number(match[1]) > workerCount)
+                        initialWorkerStates[`$unset.${field}`] = true;
+                }
+            } catch (error) {
+                console.warn('[@cocreate/server] Could not clear unused worker fields:', error);
+            }
+
+            const workerResponse = await this.crud.send(this.state.getServerObject(initialWorkerStates));
+            if (workerResponse?.error?.length || (workerResponse?.error && !Array.isArray(workerResponse.error)))
+                console.warn('[@cocreate/server] Could not update the worker profile:', workerResponse.error);
+            await this.state.save('running');
 
             // Route mesh commands to IPC
             const systemEvents = ['restart', 'reboot', 'shutdown', 'cordon', 'shed', 'drain'];
