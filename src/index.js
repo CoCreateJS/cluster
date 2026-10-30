@@ -34,6 +34,7 @@ import SocketServer from '@cocreate/socket-server';
 import CrudServer from '@cocreate/crud-server';
 import FileServer from '@cocreate/file-server';
 import ApiServer from '@cocreate/api';
+import Workflow from '@cocreate/workflows';
 import Usage from '@cocreate/usage';
 
 import { ObjectId, getClientInfo } from '@cocreate/utils';
@@ -320,6 +321,7 @@ export class CoCreateServer {
         this.authenticate = authenticate.init(this);
         this.mesh = ServerMesh;
         this.api = await ApiServer.init(this);
+        this.workflow = await Workflow.init(this);
 
         if (this.isPrimary) {
             console.log(`[@cocreate/server] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);
@@ -454,6 +456,7 @@ export class CoCreateServer {
 
             this.wsManager = new SocketServer(this);
             this.wsManager.on('api', this.api.send);
+            this.wsManager.on('workflow', this.workflow.run);
             this.files = await FileServer.init(this);
 
             const reportListening = (state) => {
