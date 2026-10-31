@@ -75,6 +75,7 @@
     "@cocreate/socket-server": "^1.36.0",
     "@cocreate/server-usage": "^1.9.0",
     "@cocreate/utils": "^1.54.0",
-    "@cocreate/workflows": "^1.0.0"
+    "@cocreate/workflows": "^1.0.0",
+    "@cocreate/api": "^1.31.0"
   }
 }
