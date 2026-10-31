@@ -35,7 +35,7 @@ import CrudServer from '@cocreate/crud-server';
 import FileServer from '@cocreate/file-server';
 import ApiServer from '@cocreate/api';
 import Workflow from '@cocreate/workflows';
-import Usage from '@cocreate/usage';
+import Usage from '@cocreate/server-usage';
 
 import { ObjectId, getClientInfo } from '@cocreate/utils';
 
