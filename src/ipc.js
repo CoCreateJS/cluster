@@ -286,7 +286,7 @@ export function init(Server, pendingPromises) {
                     try {
                         workerProcess.send(payload);
                     } catch (err) {
-                        console.error(`[@cocreate/server] [MASTER] Failed to send IPC payload to worker ${workerObj.id}:`, err.message);
+                        console.error(`[@cocreate/cluster] [MASTER] Failed to send IPC payload to worker ${workerObj.id}:`, err.message);
                     }
                 }
             }
@@ -421,7 +421,7 @@ export function init(Server, pendingPromises) {
                 try {
                     process.send(payload);
                 } catch (err) {
-                    console.error(`[@cocreate/server] [WORKER ${process.pid}] Failed to dispatch IPC message to master:`, err.message);
+                    console.error(`[@cocreate/cluster] [WORKER ${process.pid}] Failed to dispatch IPC message to master:`, err.message);
                 }
             } else {
                 if (payload.method) {

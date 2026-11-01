@@ -168,7 +168,7 @@ export function log(level = 'info', message = '', metadata = null) {
                     log: logEntry
                 });
             } catch (err) {
-                originalConsole.error('[@cocreate/server] [WORKER LOG IPC ERROR]', err.message);
+                originalConsole.error('[@cocreate/cluster] [WORKER LOG IPC ERROR]', err.message);
             }
         }
     } else {
@@ -244,7 +244,7 @@ export async function save() {
             await server.crud.send(payload);
         }
     } catch (err) {
-        originalConsole.error('[@cocreate/server] [LOG FLUSH ERROR]', err.message);
+        originalConsole.error('[@cocreate/cluster] [LOG FLUSH ERROR]', err.message);
     } finally {
         isLoggingInternal = false;
     }

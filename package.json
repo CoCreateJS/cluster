@@ -1,5 +1,5 @@
 {
-  "name": "@cocreate/server",
+  "name": "@cocreate/cluster",
   "version": "1.12.0",
   "description": "A secure, stateless, clustered headless server built for high-performance multi-tenancy, real-time collaboration, and sandboxed AST execution.",
   "keywords": [
@@ -29,14 +29,14 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cocreatejs/CoCreate-server.git"
+    "url": "git+https://github.com/CoCreateJS/cluster.git"
   },
   "author": "CoCreate LLC",
   "license": "AGPL-3.0",
   "bugs": {
-    "url": "https://github.com/CoCreateJS/CoCreate-server/issues"
+    "url": "https://github.com/CoCreateJS/cluster/issues"
   },
-  "homepage": "https://CoCreateJS.com/docs/server",
+  "homepage": "https://CoCreateJS.com/docs/cluster",
   "funding": {
     "type": "GitHub Sponsors ❤",
     "url": "https://github.com/sponsors/CoCreate-app"
