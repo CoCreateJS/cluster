@@ -1,3 +1,60 @@
+# [1.7.0](https://github.com/CoCreateJS/cluster/compare/v1.6.1...v1.7.0) (2026-11-01)
+
+
+### Bug Fixes
+
+* add Deno specific entries to .gitignore ([7429985](https://github.com/CoCreateJS/cluster/commit/742998512833235d3836cf62379ec92984aa346b))
+* api.webhook ([5b6bed0](https://github.com/CoCreateJS/cluster/commit/5b6bed0f4df430deacefc98214d7035c1ddc2d92))
+* bump [@cocreate](https://github.com/cocreate) dependencies ([d9b5875](https://github.com/CoCreateJS/cluster/commit/d9b5875babb57b71c4b6b462d9e36e192034d241))
+* bump versions ([222bdf6](https://github.com/CoCreateJS/cluster/commit/222bdf6e17d29c1c24ad44bc3f07393fb418fd33))
+* bump versions ([108cbc1](https://github.com/CoCreateJS/cluster/commit/108cbc15506d97fc7c34bf97e5a117da2a85bdc7))
+* enhance logging for primary and worker processes, update UUID generation method ([a675550](https://github.com/CoCreateJS/cluster/commit/a67555036405f979a74fcf3246a9c2a59b5af8ea))
+* implement fallback servers for primary node and enhance edge listener management ([7f51f8f](https://github.com/CoCreateJS/cluster/commit/7f51f8f818bdad826ed3a8dec015ae5aa8df741f))
+* instance renamed to vm ([9118ce2](https://github.com/CoCreateJS/cluster/commit/9118ce2371788c35c5c89dcedeea8100fc872873))
+* move HTTP edge listener setup to HTTPS initialization and update server ID handling ([feeba7c](https://github.com/CoCreateJS/cluster/commit/feeba7cb47b6033e29deae8a1a91264f3591311d))
+* persist server lifecycle state ([8a76f8a](https://github.com/CoCreateJS/cluster/commit/8a76f8a2f174fc226c19aacd67687faa6bb0980a))
+* remove outdated dependency for @cocreate/server in package.json ([7d2d5e5](https://github.com/CoCreateJS/cluster/commit/7d2d5e57cef728ab21ad5be3717b3c1eb40d10fb))
+* remove trailing slash from node_modules entry in .gitignore ([29b2eef](https://github.com/CoCreateJS/cluster/commit/29b2eef91ed6c82cf7b6b0d0c84a6b815b7563d0))
+* remove unnecessary log statement for worker state reset in CoCreateServer ([6931ac4](https://github.com/CoCreateJS/cluster/commit/6931ac4247172b0973cccb681bed787f443e3597))
+* reset persisted worker profiles before startup ([92f6731](https://github.com/CoCreateJS/cluster/commit/92f6731f4cd9de7ce3e68c1ed44336e8f855a021))
+* stamp worker origin in single-process IPC sends ([55195b0](https://github.com/CoCreateJS/cluster/commit/55195b01e87cb2d58945d6726c1c4683d6c52de5))
+* update @cocreate/acme dependency version to ^1.5.2 and ensure consistency in package.json ([310aae4](https://github.com/CoCreateJS/cluster/commit/310aae45ea6fe5a00561bb3264527a449f2876f7))
+* update @cocreate/crud-server dependency to version 1.39.0 ([36757bd](https://github.com/CoCreateJS/cluster/commit/36757bd2f083ba3a5b8aa1f69bd028052aa759e0))
+* update Config initialization to use request method for improved configuration handling ([b49e201](https://github.com/CoCreateJS/cluster/commit/b49e201ee669d9463d2365b2ba42087d8c23aae3))
+* update git url ([c5ece6a](https://github.com/CoCreateJS/cluster/commit/c5ece6a97bb598f7d05447bdda792f97a1f343c1))
+* update GitHub Actions to use latest versions and sync package.json description ([6e3b595](https://github.com/CoCreateJS/cluster/commit/6e3b5951436907d2c95ef1e1cb1bd27a98adb442))
+* update process label format in isCordon logging for clarity ([3c25928](https://github.com/CoCreateJS/cluster/commit/3c2592853f72013fa9b7482b08617f86b60c2d60))
+* update server state handling ([ee89353](https://github.com/CoCreateJS/cluster/commit/ee893536aad42c28c44aa11405d64e34da592047))
+* update TLS dependency and improve route handling logic ([5427923](https://github.com/CoCreateJS/cluster/commit/5427923c158e3cee1095fee0079dfa7ee0546ab6))
+
+
+### Features
+
+* add TLSManager for handling SSL certificates and HTTPS options ([d61a879](https://github.com/CoCreateJS/cluster/commit/d61a879c4021f3f4349d23bd88afc71363b75f38))
+* added storage artifacts ([2bf1d89](https://github.com/CoCreateJS/cluster/commit/2bf1d89c241936168ae9e610ee9babacfd04ca9a))
+* bump all dependencies ([7b29af3](https://github.com/CoCreateJS/cluster/commit/7b29af312f142b9ce52a53ed97215c32a23d9c05))
+* bumped all dependency versions ([00994ac](https://github.com/CoCreateJS/cluster/commit/00994acfddc828812ada4af3d6d49fb307e6ef8d))
+* enhance state management and shutdown handling in CoCreateServer ([8dff3c5](https://github.com/CoCreateJS/cluster/commit/8dff3c5031b0985ba845f85faa61a761c65c41f7))
+* expand server message routing and state controls ([3db28a6](https://github.com/CoCreateJS/cluster/commit/3db28a67a3faf1742a07824ece9c14a0b87b055b))
+* implement ClusterStateManager for robust state management across cluster nodes ([8f1a1f6](https://github.com/CoCreateJS/cluster/commit/8f1a1f69b8eff63faf0e1ffdbcd09937f9498552))
+* implement StateManager for enhanced server state management and lifecycle control ([7f09eba](https://github.com/CoCreateJS/cluster/commit/7f09ebabdcdc96809684027cf41abc80d7810ca1))
+* improved init and api ([2ade021](https://github.com/CoCreateJS/cluster/commit/2ade021a3a17e201b782fa6ff5333911a2705a09))
+* integrate usage tracking into CoCreateServer ([c07224f](https://github.com/CoCreateJS/cluster/commit/c07224fbd7b8771f86edd54dfaf434f22b1acf21))
+* overhaul state management and remove TLS module ([c037371](https://github.com/CoCreateJS/cluster/commit/c0373716413e8b7742974810af11379fa114a1b0))
+* Refactor cluster state management and introduce IPC and storage modules ([6700f49](https://github.com/CoCreateJS/cluster/commit/6700f4912a47cd0722d6416a10f25b0353dfdcf0))
+* refactor CoCreateServer to use 'master' terminology and introduce LogManager for centralized logging ([1dc9162](https://github.com/CoCreateJS/cluster/commit/1dc91629b9524b386b0229c4fc192082de2fbd2b))
+* refactor server to use getInfrastructure and include location in state management ([1a9e14e](https://github.com/CoCreateJS/cluster/commit/1a9e14ed67536b7165e3c2c8d132fb7d592b9d45))
+* refactor Storage class to use 'server' terminology and improve state synchronization handling ([97fdcd9](https://github.com/CoCreateJS/cluster/commit/97fdcd93a6cd4783d7668702ccbdbe8a9bb721ea))
+* refine organization IPC routing ([5432d10](https://github.com/CoCreateJS/cluster/commit/5432d1082b7ac56c97cb5871b248760cc51cc3df))
+* remove console log statements for cleaner server and state management ([3c395fe](https://github.com/CoCreateJS/cluster/commit/3c395fef1052c515bef91e63881ab9fd7748767a))
+* rename Acme to Certificates and enhance SNI support in HTTPS options ([2573df0](https://github.com/CoCreateJS/cluster/commit/2573df03a428e4b81ee6b100908c165c1f562959))
+* Replace acme with certificates ([adcdf0b](https://github.com/CoCreateJS/cluster/commit/adcdf0b77b7709ef09a0dbeecae4dcfbe64408f6))
+* requestHandler return gates and resoponse if organization balance 0 ([336ca81](https://github.com/CoCreateJS/cluster/commit/336ca8178bdf7a1013a690d4c2b583df663d2283))
+* streamline CoCreateServer initialization by removing unused properties and enhancing worker service setup ([74b5fc0](https://github.com/CoCreateJS/cluster/commit/74b5fc0dd708de6d0980efd719cc5695132fdff8))
+* unify IPC routing across workers and servers ([6c14bc1](https://github.com/CoCreateJS/cluster/commit/6c14bc187621ee9d7cde76bde5c310ff12122ab6))
+* update IP retrieval to use getClientInfo for improved accuracy ([a0e4c8c](https://github.com/CoCreateJS/cluster/commit/a0e4c8c5b5eb75565389e50fdaf8781a299a3442))
+* update redirect handling to use 301 for HTTPS and improve fallback response ([f4ce5ce](https://github.com/CoCreateJS/cluster/commit/f4ce5ced60d3616a6cd0d74ca52f2ea7c185b0ee))
+
 ## [1.6.1](https://github.com/CoCreate-app/CoCreate-server/compare/v1.6.0...v1.6.1) (2026-07-19)
 
 
