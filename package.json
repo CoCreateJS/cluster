@@ -22,23 +22,6 @@
   "publishConfig": {
     "access": "public"
   },
-  "cocreate": {
-    "environment": [
-      "server"
-    ],
-    "interface": {
-      "schemaVersion": 1,
-      "summary": "A secure, stateless, clustered headless server built for high-performance multi-tenancy, real-time collaboration, and sandboxed AST execution.",
-      "source": "src/index.js",
-      "api": {
-        "exports": [
-          "ClusterManager",
-          "CoCreateServer",
-          "default"
-        ]
-      }
-    }
-  },
   "scripts": {
     "start": "webpack --config webpack.config.js",
     "build": "webpack --mode=production --config webpack.config.js",
