@@ -1,19 +1,19 @@
-# Contributing to CoCreate-server
+# Contributing to cluster
 
-This project is work of [many contributors](https://github.com/CoCreate-app/CoCreate-server/graphs/contributors).
-You're encouraged to submit [pull requests](https://github.com/CoCreate-app/CoCreate-server/pulls),
-[propose features and discuss issues](https://github.com/CoCreate-app/CoCreate-server/issues).
+This project is work of [many contributors](https://github.com/CoCreateJS/cluster/graphs/contributors).
+You're encouraged to submit [pull requests](https://github.com/CoCreateJS/cluster/pulls),
+[propose features and discuss issues](https://github.com/CoCreateJS/cluster/issues).
 
 In the examples below, substitute your Github username for `contributor` in URLs.
 
 ## Fork the Project
 
-Fork the [project on Github](https://github.com/CoCreate-app/CoCreate-server) and check out your copy.
+Fork the [project on Github](https://github.com/CoCreateJS/cluster) and check out your copy.
 
 ```
-git clone https://github.com/contributor/CoCreate-server.git
-cd CoCreate-server
-git remote add upstream https://gitlab.com/cocreatejs/CoCreate-server.git
+git clone https://github.com/contributor/cluster.git
+cd cluster
+git remote add upstream https://github.com/CoCreateJS/cluster.git
 ```
 
 ## Create a Topic Branch
@@ -70,7 +70,7 @@ git push origin my-feature-branch
 
 ## Make a Pull Request
 
-Go to [https://github.com/CoCreate-app/CoCreate-server](https://github.com/CoCreate-app/CoCreate-server) and select your feature branch.
+Go to [https://github.com/CoCreateJS/cluster](https://github.com/CoCreateJS/cluster) and select your feature branch.
 Click the 'Pull Request' button and fill out the form. Pull requests are usually reviewed within a few days.
 
 ## Rebase

@@ -68,14 +68,14 @@ function setupSignalHandlers() {
     if (server?.isPrimary) {
         ['SIGINT', 'SIGTERM', 'SIGBREAK'].forEach((signal) => {
             process.on(signal, () => {
-                console.log(`\n[@cocreate/server] [MASTER] Received ${signal}. Orchestrating graceful shutdown...`);
+                console.log(`\n[@cocreate/cluster] [MASTER] Received ${signal}. Orchestrating graceful shutdown...`);
                 triggerGlobalShutdown(signal);
             });
         });
     } else {
         ['SIGINT', 'SIGTERM', 'SIGBREAK'].forEach((signal) => {
             process.on(signal, async () => {
-                console.log(`\n[@cocreate/server] [WORKER ${server?.workerId}] Received ${signal}. Draining local connections...`);
+                console.log(`\n[@cocreate/cluster] [WORKER ${server?.workerId}] Received ${signal}. Draining local connections...`);
                 await drain(true, true);
                 await save('stopped');
                 process.exit(0);
@@ -83,7 +83,7 @@ function setupSignalHandlers() {
         });
 
         server?.on('shutdown', async () => {
-            console.log(`[@cocreate/server] [WORKER ${server?.workerId}] Instructed by master to shutdown. Draining...`);
+            console.log(`[@cocreate/cluster] [WORKER ${server?.workerId}] Instructed by master to shutdown. Draining...`);
             await drain(true, true);
             await save('stopped');
             process.exit(0);
@@ -140,7 +140,7 @@ async function persistLifecycle(payload, attempts = 5) {
     }
 
     console.error(
-        `[@cocreate/server] Failed to persist lifecycle state after ${attempts} attempts:`,
+        `[@cocreate/cluster] Failed to persist lifecycle state after ${attempts} attempts:`,
         lastError?.message || lastError
     );
     return null;
@@ -227,7 +227,7 @@ export async function cordon(value = true, internalCall = false) {
     
     // Prevent un-cordoning if a higher operational state is active
     if (!isCordon && (server?.state?.isShedding || server?.state?.isDraining || server?.state?.isShuttingDown)) {
-        console.warn(`[@cocreate/server] Blocked un-cordon request. Active states: isShedding=${server?.state?.isShedding}, isDraining=${server?.state?.isDraining}, isShuttingDown=${server?.state?.isShuttingDown}`);
+        console.warn(`[@cocreate/cluster] Blocked un-cordon request. Active states: isShedding=${server?.state?.isShedding}, isDraining=${server?.state?.isDraining}, isShuttingDown=${server?.state?.isShuttingDown}`);
         return;
     }
 
@@ -254,7 +254,7 @@ export async function cordon(value = true, internalCall = false) {
     }
     
     const processLabel = server.isPrimary ? `[MASTER] (${process.pid})` : `[WORKER] ${process.pid} (ID: ${server.workerId})`;
-    console.log(`[@cocreate/server] ${processLabel} isCordon updated to: ${server?.state?.isCordon}`);
+    console.log(`[@cocreate/cluster] ${processLabel} isCordon updated to: ${server?.state?.isCordon}`);
 }
 
 /**
@@ -279,7 +279,7 @@ export async function shed(arg, internalCall = false) {
 
     // Prevent un-shedding if drain or shutdown is active
     if (!isShedding && (server?.state?.isDraining || server?.state?.isShuttingDown)) {
-        console.warn(`[@cocreate/server] Blocked un-shed request while drain or shutdown is active.`);
+        console.warn(`[@cocreate/cluster] Blocked un-shed request while drain or shutdown is active.`);
         return;
     }
 
@@ -293,7 +293,7 @@ export async function shed(arg, internalCall = false) {
     if (isShedding) {
         await cordon(true, true);
         if (!server.isPrimary && organizations.length > 0 && server.wsManager) {
-            console.log(`[@cocreate/server] Selective eviction of org IDs:`, organizations);
+            console.log(`[@cocreate/cluster] Selective eviction of org IDs:`, organizations);
             server.wsManager.destroyOrganizations(organizations);
         }
     } else {
@@ -309,7 +309,7 @@ export async function shed(arg, internalCall = false) {
     }
 
     const processLabel = server.isPrimary ? `Master (${process.pid})` : `Worker ${process.pid} (ID: ${server.workerId})`;
-    console.log(`[@cocreate/server] ${processLabel} isShedding updated to: ${server?.state?.isShedding}`);
+    console.log(`[@cocreate/cluster] ${processLabel} isShedding updated to: ${server?.state?.isShedding}`);
 }
 
 /**
@@ -323,7 +323,7 @@ export async function drain(value = true, internalCall = false) {
 
     // Prevent un-draining if shutdown is active
     if (!isDraining && server?.state?.isShuttingDown) {
-        console.warn(`[@cocreate/server] Blocked un-drain request while shutdown is active.`);
+        console.warn(`[@cocreate/cluster] Blocked un-drain request while shutdown is active.`);
         return;
     }
 
@@ -336,7 +336,7 @@ export async function drain(value = true, internalCall = false) {
     if (isDraining) {
         await cordon(true, true);
         if (!server.isPrimary && server.wsManager) {
-            console.log(`[@cocreate/server] Worker drain triggered. Purging websocket connections.`);
+            console.log(`[@cocreate/cluster] Worker drain triggered. Purging websocket connections.`);
             server.wsManager.destroyAll();
         }
     } else {
@@ -352,7 +352,7 @@ export async function drain(value = true, internalCall = false) {
     }
 
     const processLabel = server.isPrimary ? `Master (${process.pid})` : `Worker ${process.pid} (ID: ${server.workerId})`;
-    console.log(`[@cocreate/server] ${processLabel} isDraining updated to: ${server?.state?.isDraining}`);
+    console.log(`[@cocreate/cluster] ${processLabel} isDraining updated to: ${server?.state?.isDraining}`);
 }
 
 /**
@@ -371,13 +371,13 @@ export async function restart(payload = {}, fromEvent = false) {
 
     if (server.isPrimary) {
         if (payload && (payload.isPrimary || payload.master)) {
-            console.log(`[@cocreate/server] [MASTER] App restart commanded. Triggering global graceful shutdown...`);
+            console.log(`[@cocreate/cluster] [MASTER] App restart commanded. Triggering global graceful shutdown...`);
             triggerGlobalShutdown('API_RESTART');
         }
     } else {
         if (payload && (payload.isPrimary || payload.master)) return;
 
-        console.log(`[@cocreate/server] [WORKER ${server.workerId}] Restart triggered. Commencing drain...`);
+        console.log(`[@cocreate/cluster] [WORKER ${server.workerId}] Restart triggered. Commencing drain...`);
         await save('restarting');
         await drain(true, true);
         await save('stopped');
@@ -402,7 +402,7 @@ export function reboot(payload = {}, fromEvent = false) {
 
     if (!server.isPrimary) return;
 
-    console.log(`[@cocreate/server] [MASTER] OS Reboot requested. Commencing graceful shutdown before kernel reboot...`);
+    console.log(`[@cocreate/cluster] [MASTER] OS Reboot requested. Commencing graceful shutdown before kernel reboot...`);
     if (server.state) server.state.status = 'REBOOTING';
     
     if (server.mesh) {
@@ -411,10 +411,10 @@ export function reboot(payload = {}, fromEvent = false) {
     save();
 
     triggerGlobalShutdown('OS_REBOOT', () => {
-        console.log(`[@cocreate/server] [MASTER] Executing OS Reboot: sudo reboot`);
+        console.log(`[@cocreate/cluster] [MASTER] Executing OS Reboot: sudo reboot`);
         exec('sudo reboot', (err) => {
             if (err) {
-                console.error("[@cocreate/server] Failed to execute sudo reboot:", err.message);
+                console.error("[@cocreate/cluster] Failed to execute sudo reboot:", err.message);
                 process.exit(1);
             }
         });
@@ -438,14 +438,14 @@ export function shutdown(payload = {}, fromEvent = false) {
 
     if (!server.isPrimary) return;
 
-    console.log(`[@cocreate/server] [MASTER] OS Shutdown requested. Commencing graceful shutdown before VM poweroff...`);
+    console.log(`[@cocreate/cluster] [MASTER] OS Shutdown requested. Commencing graceful shutdown before VM poweroff...`);
     if (server.state) server.state.status = 'STOPPED';
 
     triggerGlobalShutdown('OS_SHUTDOWN', () => {
-        console.log(`[@cocreate/server] [MASTER] Executing OS Poweroff: sudo poweroff`);
+        console.log(`[@cocreate/cluster] [MASTER] Executing OS Poweroff: sudo poweroff`);
         exec('sudo poweroff', (err) => {
             if (err) {
-                console.error("[@cocreate/server] Failed to execute sudo poweroff:", err.message);
+                console.error("[@cocreate/cluster] Failed to execute sudo poweroff:", err.message);
                 process.exit(1);
             }
         });
@@ -461,7 +461,7 @@ export function shutdown(payload = {}, fromEvent = false) {
 export async function triggerGlobalShutdown(reason, completionCallback) {
     if (!server.isPrimary || server.state?.isShuttingDown) return;
 
-    console.log(`\n[@cocreate/server] [MASTER] Commencing Global Shutdown Sequence (Reason: ${reason})...`);
+    console.log(`\n[@cocreate/cluster] [MASTER] Commencing Global Shutdown Sequence (Reason: ${reason})...`);
     
     if (server.state) {
         server.state.isShuttingDown = true;
@@ -495,7 +495,7 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
                 server.mesh.close();
             }
             if (server.state) server.state.isMeshClosed = true;
-            console.log("[@cocreate/server] [MASTER] Mesh closed successfully.");
+            console.log("[@cocreate/cluster] [MASTER] Mesh closed successfully.");
         }, stateConfig.meshCloseDelayMs);
     }
 
@@ -513,7 +513,7 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
     // Step 3: Safety timeout
     if (server.state) {
         server.state.primaryShutdownTimeout = setTimeout(async () => {
-            console.error(`[@cocreate/server] [MASTER] Shutdown Timeout exceeded (${stateConfig.shutdownTimeoutMs / 1000}s). Forcing process exit.`);
+            console.error(`[@cocreate/cluster] [MASTER] Shutdown Timeout exceeded (${stateConfig.shutdownTimeoutMs / 1000}s). Forcing process exit.`);
             await finalizeShutdown();
             if (typeof completionCallback === 'function') completionCallback();
             else process.exit(1);
@@ -526,7 +526,7 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
     }
     
     if (server.workers && server.workers.size === 0) {
-        console.log("[@cocreate/server] [MASTER] No active workers detected. Concluding shutdown.");
+        console.log("[@cocreate/cluster] [MASTER] No active workers detected. Concluding shutdown.");
         await finalizeShutdown();
         if (typeof completionCallback === 'function') setTimeout(completionCallback, 1000);
         else setTimeout(() => process.exit(0), 1000);
@@ -566,7 +566,7 @@ export function evaluateMasterFallback() {
                 fallbackHttpsServer.listen(HTTPS_PORT, BIND_IP);
             }
             
-            console.log(`[@cocreate/server] [MASTER] All workers cordoned/down. Master fallback active (500 mode).`);
+            console.log(`[@cocreate/cluster] [MASTER] All workers cordoned/down. Master fallback active (500 mode).`);
         }
     } else {
         if (fallbackHttpServer) {
@@ -576,7 +576,7 @@ export function evaluateMasterFallback() {
                 fallbackHttpsServer.close();
                 fallbackHttpsServer = null;
             }
-            console.log(`[@cocreate/server] [MASTER] Workers active. Deactivating Master fallback.`);
+            console.log(`[@cocreate/cluster] [MASTER] Workers active. Deactivating Master fallback.`);
         }
     }
 }

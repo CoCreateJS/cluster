@@ -35,7 +35,7 @@ For a complete guide, deployment examples, and API reference, visit the **CoCrea
 
 ## Architectural Overview & Core Design
 
-`@cocreate/server` is engineered to run stateless, highly available workloads across multi-core systems and distributed cloud infrastructure.
+`@cocreate/cluster` is engineered to run stateless, highly available workloads across multi-core systems and distributed cloud infrastructure.
 
 ### Clustered IPC Architecture
 
@@ -97,10 +97,10 @@ The server composes multiple standalone CoCreate modules into a unified runtime.
 | --- | --- |
 | `@cocreate/certificates` | TLS certificate management |
 | `@cocreate/socket-server` | WebSocket server |
-| `@cocreate/server-mesh` | Cluster communication |
+| `@cocreate/cluster-mesh` | Cluster communication |
 | `@cocreate/crud-server` | Database routing |
-| `@cocreate/server-autoscaler` | Automatic scaling |
-| `@cocreate/server-telemetry` | Monitoring and metrics |
+| `@cocreate/cluster-autoscaler` | Automatic scaling |
+| `@cocreate/cluster-telemetry` | Monitoring and metrics |
 | `@cocreate/api` | Dynamic API execution |
 | `@cocreate/file-server` | Static file serving |
 | `@cocreate/lazy-loader` | Lazy loading and webhooks |
@@ -409,7 +409,7 @@ server.storage.on(
 
 ## Distributed Cluster Orchestration
 
-Cluster communication is provided by `@cocreate/server-mesh`.
+Cluster communication is provided by `@cocreate/cluster-mesh`.
 
 ```javascript
 server.mesh.send({
@@ -489,13 +489,13 @@ Once the final client disconnects:
 ### NPM
 
 ```bash
-npm install @cocreate/server
+npm install @cocreate/cluster
 ```
 
 ### Yarn
 
 ```bash
-yarn add @cocreate/server
+yarn add @cocreate/cluster
 ```
 
 ---
@@ -503,7 +503,7 @@ yarn add @cocreate/server
 ## Quick Start
 
 ```javascript
-import CoCreateServer from "@cocreate/server";
+import CoCreateServer from "@cocreate/cluster";
 
 async function startServer() {
 	const server =
@@ -559,7 +559,7 @@ Bug reports, feature requests, documentation improvements, and pull requests are
 
 ## About
 
-`@cocreate/server` is designed, built, and maintained by the CoCreate Developer Experience Team.
+`@cocreate/cluster` is designed, built, and maintained by the CoCreate Developer Experience Team.
 
 It serves as the core runtime responsible for process orchestration, clustering, networking, module composition, and lifecycle management across the CoCreate platform.
 

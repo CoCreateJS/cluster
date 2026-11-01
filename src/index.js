@@ -101,7 +101,7 @@ export class ClusterManager {
             this.server.state = await State.init(this.server);
         if (!this.isPrimary || this.totalWorkers <= 1) return;
 
-        console.log(`[@cocreate/server] [MASTER] Orchestrator creating ${this.totalWorkers} workers.`);
+        console.log(`[@cocreate/cluster] [MASTER] Orchestrator creating ${this.totalWorkers} workers.`);
 
         const generateWorkerEnv = (wId) => ({
             WORKER_ID: String(wId),
@@ -125,7 +125,7 @@ export class ClusterManager {
                     if (workersReady && this.server.state?.save) {
                         this.server.state.save('running').catch((error) => {
                             console.error(
-                                '[@cocreate/server] Failed to publish master readiness:',
+                                '[@cocreate/cluster] Failed to publish master readiness:',
                                 error.message
                             );
                         });
@@ -139,7 +139,7 @@ export class ClusterManager {
             const worker = cluster.fork(generateWorkerEnv(currentWorkerId));
 
             worker.on('error', (err) => {
-                console.error(`[@cocreate/server] [MASTER] Error on Worker ${currentWorkerId}:`, err.message);
+                console.error(`[@cocreate/cluster] [MASTER] Error on Worker ${currentWorkerId}:`, err.message);
             });
 
             worker.on('message', (msg) => handleWorkerListeningMsg(currentWorkerId, msg));
@@ -153,7 +153,7 @@ export class ClusterManager {
         }
 
         cluster.on('exit', async (worker, code, signal) => {
-            console.log(`[@cocreate/server] [MASTER] Worker ${worker.process.pid} exited (Code: ${code}, Signal: ${signal})`);
+            console.log(`[@cocreate/cluster] [MASTER] Worker ${worker.process.pid} exited (Code: ${code}, Signal: ${signal})`);
 
             let deadWorkerId = null;
             for (let [id, w] of this.workers.entries()) {
@@ -184,10 +184,10 @@ export class ClusterManager {
             const isCordoned = state?.isCordon || state?.isCordoned;
 
             if (state?.isShuttingDown || state?.isDraining || isCordoned) {
-                console.log(`[@cocreate/server] [MASTER] Worker ${worker.process.pid} removed. Active workers remaining: ${this.workers.size}`);
+                console.log(`[@cocreate/cluster] [MASTER] Worker ${worker.process.pid} removed. Active workers remaining: ${this.workers.size}`);
 
                 if (this.workers.size === 0) {
-                    console.log("[@cocreate/server] [MASTER] All workers successfully drained.");
+                    console.log("[@cocreate/cluster] [MASTER] All workers successfully drained.");
                     if (this.server.state.masterShutdownTimeout) clearTimeout(this.server.state.masterShutdownTimeout);
                     if (typeof this.server.state.shutdownCompletionCallback === 'function') {
                         this.server.state.shutdownCompletionCallback();
@@ -201,11 +201,11 @@ export class ClusterManager {
             const targetId = deadWorkerId || (this.workers.size + 1);
 
             setTimeout(() => {
-                console.log(`[@cocreate/server] [MASTER] Respawning Worker ${targetId}...`);
+                console.log(`[@cocreate/cluster] [MASTER] Respawning Worker ${targetId}...`);
                 const newWorker = cluster.fork(generateWorkerEnv(targetId));
 
                 newWorker.on('error', (err) => {
-                    console.error(`[@cocreate/server] [MASTER] Error on replacement Worker ${targetId}:`, err.message);
+                    console.error(`[@cocreate/cluster] [MASTER] Error on replacement Worker ${targetId}:`, err.message);
                 });
 
                 newWorker.on('message', (msg) => handleWorkerListeningMsg(targetId, msg));
@@ -306,7 +306,7 @@ export class CoCreateServer {
             } else {
                 this.id = process.env.SERVER_ID || ObjectId().toString();
                 await Config.prompt({ server_id: { value: this.id } });
-                console.log(`[@cocreate/server] [MASTER] Generated & persisted new Server ID: ${this.id}`);
+                console.log(`[@cocreate/cluster] [MASTER] Generated & persisted new Server ID: ${this.id}`);
             }
             process.env.SERVER_ID = this.id || "";
         } else {
@@ -322,7 +322,7 @@ export class CoCreateServer {
         this.api = await ApiServer.init(this);
 
         if (this.isPrimary) {
-            console.log(`[@cocreate/server] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);
+            console.log(`[@cocreate/cluster] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);
             this.location = await getClientInfo();
             this.ip = this.location.ip;
             this.infrastructure = await getInfrastructure(this.id);
@@ -363,19 +363,19 @@ export class CoCreateServer {
                         initialWorkerStates[`$unset.${field}`] = true;
                 }
             } catch (error) {
-                console.warn('[@cocreate/server] Could not clear unused worker fields:', error);
+                console.warn('[@cocreate/cluster] Could not clear unused worker fields:', error);
             }
 
             const workerResponse = await this.crud.send(this.state.getServerObject(initialWorkerStates));
             if (workerResponse?.error?.length || (workerResponse?.error && !Array.isArray(workerResponse.error)))
-                console.warn('[@cocreate/server] Could not update the worker profile:', workerResponse.error);
+                console.warn('[@cocreate/cluster] Could not update the worker profile:', workerResponse.error);
             await this.state.save('running');
 
             // Route mesh commands to IPC
             const systemEvents = ['restart', 'reboot', 'shutdown', 'cordon', 'shed', 'drain'];
             for (const eventName of systemEvents) {
                 this.mesh.on(eventName, (payload) => {
-                    console.log(`[@cocreate/server] [MASTER] Received remote mesh command: "${eventName}"`);
+                    console.log(`[@cocreate/cluster] [MASTER] Received remote mesh command: "${eventName}"`);
                     this.send(payload);
                 });
             }
@@ -394,7 +394,7 @@ export class CoCreateServer {
             this.workerId = this.cluster.workerId;
 
             if (!this.isPrimary) {
-                console.log(`[@cocreate/server] [WORKER ${this.workerId}] running with PID: ${process.pid} (Server ID: ${this.id})`);
+                console.log(`[@cocreate/cluster] [WORKER ${this.workerId}] running with PID: ${process.pid} (Server ID: ${this.id})`);
             }
 
             this.telemetry = await ServerTelemetry.init(this);
@@ -465,11 +465,11 @@ export class CoCreateServer {
             this.http.on('listening', () => reportListening(true));
             this.http.on('close', () => reportListening(false));
             this.http.listen(HTTP_PORT, BIND_IP, () => {
-                console.log(`[@cocreate/server] [WORKER ${this.workerId}] HTTP listening on ${BIND_IP}:${HTTP_PORT}`);
+                console.log(`[@cocreate/cluster] [WORKER ${this.workerId}] HTTP listening on ${BIND_IP}:${HTTP_PORT}`);
             });
 
             this.https.listen(HTTPS_PORT, BIND_IP, () => {
-                console.log(`[@cocreate/server] [WORKER ${this.workerId}] HTTPS listening on ${BIND_IP}:${HTTPS_PORT}`);
+                console.log(`[@cocreate/cluster] [WORKER ${this.workerId}] HTTPS listening on ${BIND_IP}:${HTTPS_PORT}`);
             });
 
             // Publish worker active running state object to DB upon creation/startup
@@ -540,7 +540,7 @@ export class CoCreateServer {
             // 3. Default route handling: Static file server
             return this.files.send(req, res);
         } catch (error) {
-            console.error('[@cocreate/server] Edge request routing error:', error);
+            console.error('[@cocreate/cluster] Edge request routing error:', error);
             if (!res.headersSent) {
                 res.writeHead(500, { "Content-Type": "text/plain" });
             }

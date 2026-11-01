@@ -12,7 +12,7 @@ export default {
                 "host": [
                     "*"
                 ],
-                "directory": "/demo/server/{{directory}}",
+                "directory": "/demo/cluster/{{directory}}",
                 "path": "{{path}}",
                 "pathname": "{{pathname}}",
                 "content-type": "{{content-type}}",
@@ -26,13 +26,13 @@ export default {
             "object": {
                 "_id": "61a12db2a8b6b4001a9f5a2e",
                 "name": "index.html",
-                "path": "/docs/server",
-                "pathname": "/docs/server/index.html",
+                "path": "/docs/cluster",
+                "pathname": "/docs/cluster/index.html",
                 "src": "{{./docs/index.html}}",
                 "host": [
                     "*"
                 ],
-                "directory": "server",
+                "directory": "cluster",
                 "content-type": "{{content-type}}",
                 "public": "true"
             }
