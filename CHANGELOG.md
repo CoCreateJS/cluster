@@ -1,3 +1,16 @@
+# [1.8.0](https://github.com/CoCreateJS/cluster/compare/v1.7.0...v1.8.0) (2026-11-02)
+
+
+### Bug Fixes
+
+* missing dependencies ([eda2bd7](https://github.com/CoCreateJS/cluster/commit/eda2bd768c5e85ec66d9c82a21a5d78e7f77a0e3))
+* **server:** update renamed server package references ([26fd600](https://github.com/CoCreateJS/cluster/commit/26fd60050e44b20f4e9c80153721de2c6c5e674b))
+
+
+### Features
+
+* initialize workflow server ([3fbaf6e](https://github.com/CoCreateJS/cluster/commit/3fbaf6e9ef41ac9d0c86ab1e9cc96c5fa5b8ce51))
+
 # [1.7.0](https://github.com/CoCreateJS/cluster/compare/v1.6.1...v1.7.0) (2026-11-01)
 
 
