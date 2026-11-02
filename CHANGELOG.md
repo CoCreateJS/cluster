@@ -1,3 +1,15 @@
+# [2.0.0](https://github.com/CoCreateJS/cluster/compare/v1.8.0...v2.0.0) (2026-11-02)
+
+
+### Features
+
+* align CoCreate repository and package naming ([c262a60](https://github.com/CoCreateJS/cluster/commit/c262a606f628c4a8ca1d1e928654d625e6ac8586))
+
+
+### BREAKING CHANGES
+
+* consumers must use the renamed CoCreate package and repository identities; the previous prefixed names are no longer supported.
+
 # [1.8.0](https://github.com/CoCreateJS/cluster/compare/v1.7.0...v1.8.0) (2026-11-02)
 
 
