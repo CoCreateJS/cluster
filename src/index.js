@@ -22,20 +22,20 @@ import Https from 'node:https';
 import cluster from 'node:cluster';
 import os from 'node:os';
 
-import TLS from '@cocreate/server-tls';
-import ServerMesh from '@cocreate/server-mesh';
-import ServerAutoscaler from '@cocreate/server-autoscaler';
-import ServerTelemetry from '@cocreate/server-telemetry';
+import TLS from '@cocreate/tls';
+import ServerMesh from './mesh/index.js';
+import ServerAutoscaler from '@cocreate/autoscaler';
+import ServerTelemetry from '@cocreate/telemetry';
 import Config from '@cocreate/config';
 import authenticate from '@cocreate/authenticate';
 import authorize from '@cocreate/authorize';
 
 import SocketServer from '@cocreate/socket-server';
 import CrudServer from '@cocreate/crud-server';
-import FileServer from '@cocreate/file-server';
+import FileServer from '@cocreate/file/server';
 import ApiServer from '@cocreate/api';
 import Workflow from '@cocreate/workflows';
-import Usage from '@cocreate/server-usage';
+import Usage from '@cocreate/usage';
 
 import { ObjectId, getClientInfo } from '@cocreate/utils';
 

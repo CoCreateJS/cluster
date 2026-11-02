@@ -47,18 +47,18 @@
     "@cocreate/authenticate": "^1.17.0",
     "@cocreate/authorize": "^1.21.0",
     "@cocreate/config": "^1.21.0",
-    "@cocreate/server-cron": "^1.10.0",
+    "@cocreate/cron": "^1.10.0",
     "@cocreate/crud-server": "^1.42.0",
-    "@cocreate/file-server": "^1.25.0",
+    "@cocreate/file": "^1.27.0",
     "@cocreate/lazy-loader": "^1.31.0",
-    "@cocreate/server-autoscaler": "^1.5.0",
-    "@cocreate/server-mesh": "^1.7.0",
-    "@cocreate/server-telemetry": "^1.21.0",
-    "@cocreate/server-tls": "^1.12.0",
+    "@cocreate/autoscaler": "^1.5.0",
+    "@cocreate/telemetry": "^1.21.0",
+    "@cocreate/tls": "^1.12.0",
     "@cocreate/socket-server": "^1.36.0",
-    "@cocreate/server-usage": "^1.9.0",
+    "@cocreate/usage": "^1.9.0",
     "@cocreate/utils": "^1.54.0",
     "@cocreate/workflows": "^1.0.0",
-    "@cocreate/api": "^1.31.0"
+    "@cocreate/api": "^1.31.0",
+    "ws": "^8.21.0"
   }
 }
