@@ -97,12 +97,12 @@ The server composes multiple standalone CoCreate modules into a unified runtime.
 | --- | --- |
 | `@cocreate/certificates` | TLS certificate management |
 | `@cocreate/socket-server` | WebSocket server |
-| `@cocreate/cluster-mesh` | Cluster communication |
+| `cluster/src/mesh` | Inter-server communication |
 | `@cocreate/crud-server` | Database routing |
-| `@cocreate/cluster-autoscaler` | Automatic scaling |
-| `@cocreate/cluster-telemetry` | Monitoring and metrics |
+| `@cocreate/autoscaler` | Automatic scaling |
+| `@cocreate/telemetry` | Monitoring and metrics |
 | `@cocreate/api` | Dynamic API execution |
-| `@cocreate/file-server` | Static file serving |
+| `@cocreate/file/server` | Static file serving |
 | `@cocreate/lazy-loader` | Lazy loading and webhooks |
 
 ---
@@ -409,7 +409,7 @@ server.storage.on(
 
 ## Distributed Cluster Orchestration
 
-Cluster communication is provided by `@cocreate/cluster-mesh`.
+Cluster owns its inter-server mesh implementation in `src/mesh`.
 
 ```javascript
 server.mesh.send({

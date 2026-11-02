@@ -22,18 +22,19 @@ import Https from 'node:https';
 import cluster from 'node:cluster';
 import os from 'node:os';
 
-import TLS from '@cocreate/server-tls';
-import ServerMesh from '@cocreate/server-mesh';
-import ServerAutoscaler from '@cocreate/server-autoscaler';
-import ServerTelemetry from '@cocreate/server-telemetry';
+import TLS from '@cocreate/tls';
+import ServerMesh from './mesh/index.js';
+import ServerAutoscaler from '@cocreate/autoscaler';
+import ServerTelemetry from '@cocreate/telemetry';
 import Config from '@cocreate/config';
 import authenticate from '@cocreate/authenticate';
 import authorize from '@cocreate/authorize';
 
 import SocketServer from '@cocreate/socket-server';
 import CrudServer from '@cocreate/crud-server';
-import FileServer from '@cocreate/file-server';
+import FileServer from '@cocreate/file/server';
 import ApiServer from '@cocreate/api';
+import Workflow from '@cocreate/workflows';
 import Usage from '@cocreate/usage';
 
 import { ObjectId, getClientInfo } from '@cocreate/utils';
@@ -47,6 +48,8 @@ import Log from './log.js';
 /**
  * ClusterManager handles Node.js cluster process lifecycle, worker forks,
  * worker exit respawning, IPC signal routing, and fallback master web servers.
+ * @public
+ * @environment server
  */
 export class ClusterManager {
     #emitter = new EventEmitter();
@@ -54,7 +57,9 @@ export class ClusterManager {
     /**
      * Creates an instance of ClusterManager.
      * @param {CoCreateServer} server - Reference to parent server instance.
-     */
+ * @public
+ * @environment server
+ */
     constructor(server) {
         this.server = server;
         this.isPrimary = cluster.isPrimary;
@@ -64,7 +69,9 @@ export class ClusterManager {
         this.workerId = this.isPrimary ? null : (parseInt(process.env.WORKER_ID, 10) || 1);
     }
 
-    /** Delegate event listeners without polluting top-level prototype */
+    /** Delegate event listeners without polluting top-level prototype  * @private
+ * @environment server
+ */
     on(event, listener) { this.#emitter.on(event, listener); return this; }
     once(event, listener) { this.#emitter.once(event, listener); return this; }
     off(event, listener) { this.#emitter.off(event, listener); return this; }
@@ -73,7 +80,9 @@ export class ClusterManager {
     /**
      * Resolves worker count configuration and assigns worker identity.
      * @param {string|number|boolean} configuredWorkers - Worker configuration value.
-     */
+ * @private
+ * @environment server
+ */
     configureWorkers(configuredWorkers) {
         if (configuredWorkers !== false && configuredWorkers !== 'false') {
             const parsedWorkers = parseInt(configuredWorkers, 10);
@@ -95,7 +104,9 @@ export class ClusterManager {
 
     /**
      * Initializes master cluster forks and listens for exit signals.
-     */
+ * @private
+ * @environment server
+ */
     async setupMasterCluster() {
         if (!this.server.state)
             this.server.state = await State.init(this.server);
@@ -224,6 +235,8 @@ export class ClusterManager {
 /**
  * CoCreateServer orchestrates socket handling, API endpoint dispatching,
  * SSL certificates with SNI support, and mesh cluster synchronization.
+ * @public
+ * @environment server
  */
 export class CoCreateServer {
     #emitter = new EventEmitter();
@@ -248,7 +261,9 @@ export class CoCreateServer {
         this.authorize = authorize;
     }
 
-    /** Public Event API delegates (keeps prototype clean from standard EventEmitter bloat) */
+    /** Public Event API delegates (keeps prototype clean from standard EventEmitter bloat)  * @private
+ * @environment server
+ */
     on(event, listener) { this.#emitter.on(event, listener); return this; }
     once(event, listener) { this.#emitter.once(event, listener); return this; }
     off(event, listener) { this.#emitter.off(event, listener); return this; }
@@ -320,6 +335,7 @@ export class CoCreateServer {
         this.authenticate = authenticate.init(this);
         this.mesh = ServerMesh;
         this.api = await ApiServer.init(this);
+        this.workflow = await Workflow.init(this);
 
         if (this.isPrimary) {
             console.log(`[@cocreate/cluster] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);
@@ -454,6 +470,7 @@ export class CoCreateServer {
 
             this.wsManager = new SocketServer(this);
             this.wsManager.on('api', this.api.send);
+            this.wsManager.on('workflow', this.workflow.run);
             this.files = await FileServer.init(this);
 
             const reportListening = (state) => {
@@ -550,3 +567,18 @@ export class CoCreateServer {
 }
 
 export default new CoCreateServer();
+
+/**
+ *
+ * @name default
+ * @kind member
+ * @public
+ * @environment server
+ */
+
+/**
+ * A secure, stateless, clustered headless server built for high-performance multi-tenancy, real-time collaboration, and sandboxed AST execution.
+ *
+ * @module server
+ * @environment server
+ */
