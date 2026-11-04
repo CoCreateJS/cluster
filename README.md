@@ -109,6 +109,92 @@ The server composes multiple standalone CoCreate modules into a unified runtime.
 
 ## Programmatic API Reference
 
+### Node API key initialization
+
+After CRUD initializes, the primary runs `src/apikey.js` to read one
+upload-capable API key (`type: "key"`, `admin: true`, including the supported
+string/number boolean forms) from its configured organization's `keys` array.
+Selection is ordered by record ID. It does not infer another organization from
+the cluster name or fetch GitHub credentials.
+
+The handler uses `Config.prompt({ apikey: { value } })` to update memory,
+the process environment, and `~/CoCreate.config.js` while preserving the other
+global settings. Workers inherit the environment rather than repeating the
+lookup or writing the file. No key is generated when none exists. Read or
+validation failures produce a generic boot diagnostic and do not prevent the
+server from starting; credentials are never logged by the handler.
+
+Cloud startup data contains node identity, host, and bootstrap storage, but no
+CoCreate API key. The runtime obtains that key after storage is available.
+
+### Node routing workflows
+
+Cluster's `src/routing.js` loads routing configuration after CRUD, workflows,
+and the node identity are initialized. The primary invokes `configure-cluster-routing` after
+startup readiness (all workers listening in clustered mode; HTTP and HTTPS
+listening in single-process mode). Workers do not register independently.
+
+That initialization workflow registers the node and returns a prepared removal
+request, retained in memory by `routing.js`. The existing coordinated shutdown
+path sends that request directly through `server.api.send` before stopping
+workers or closing Mesh. There is no removal workflow. This includes the
+existing `SIGINT`, `SIGTERM`, and
+`SIGBREAK` handling and application restart/reboot/shutdown paths. Routing does
+not install another set of process signal handlers. Workflow failures are
+logged without preventing the existing lifecycle from continuing.
+
+The initialization workflow name can be set in CoCreate configuration:
+
+```json
+{
+  "routing": {
+    "enabled": true,
+    "workflow": "configure-cluster-routing"
+  }
+}
+```
+
+Matching `servers_config` records with `type: "routing"` override this system
+configuration using the existing server/cluster scope rules. Their `config`
+object accepts `enabled` and `workflow`; set
+`enabled: false` in that object to disable the hooks.
+
+Each invocation uses the node's configured organization and host and the normal
+workflow envelope, for example:
+
+```js
+{
+  method: 'workflow.configure-cluster-routing',
+  organization_id: server.organization_id,
+  host: server.host,
+  'configure-cluster-routing': [{
+    server_id: server.id,
+    cluster_id: server.cluster_id,
+    ip: server.ip,
+    host: server.host,
+    infrastructure: server.infrastructure,
+    location: server.location
+  }]
+}
+```
+
+The workflow returns `configure-cluster-routing[0].remove`, an API request containing
+`api`, `endpoint`, and `data`, including provider registration IDs. A custom
+initialization workflow returns the same `remove` field under its own input
+key. Shutdown adds a `reason`, such as `SIGTERM`, and uses the node's configured
+organization and host for API execution. If no removal request was prepared,
+shutdown performs no new workflow or inventory lookup.
+
+The hooks do not create workflow definitions or contain Bunny API logic. The
+initialization workflow owns provider selection and request preparation. It
+must return nonsecret cleanup data, not API credentials. The existing API
+dispatcher still resolves the provider configuration and endpoint by name;
+this change does not introduce a shared API cache.
+
+Registration is shared across repeated readiness notifications, and withdrawal
+waits for an in-flight registration before running. Cleanup requires a graceful
+shutdown; abrupt process or host failure remains a routing fallback concern.
+
 Every server instance extends Node.js `EventEmitter`.
 
 ### Instance Properties
@@ -576,3 +662,32 @@ For open-source projects and non-commercial use, this software is available unde
 ### Commercial
 
 Organizations requiring proprietary use may obtain a commercial license from CoCreate.
+
+## Node repository
+
+The primary owns one shared repository independently of AI. It reads the global `repository` config and scoped `servers_config` records with `type: "repository"`, applying database overrides. Defaults are:
+
+```js
+{
+    enabled: true,
+    url: "", // falls back to the server organization's git.clone_url
+    api: "", // tenant apis record ID/name; defaults to organization.git.api
+    branch: "dev",
+    remote: "origin",
+    localFsRoot: "<working-directory>/organizations",
+    onStartup: "clone",
+    onShutdown: "commit-and-push",
+    startupTimeoutMs: 60000,
+    shutdownTimeoutMs: 10000
+}
+```
+
+Before workers fork, the master clones a missing repository into `<localFsRoot>/<organization_id>/sites` and selects the configured branch. Missing repository metadata is a no-op. An existing checkout is reused without pulling/resetting; switching branches requires a clean working tree and a matching remote. A configured checkout failure prevents worker startup. Set `enabled: false` to disable lifecycle handling, or set either action to `false` independently. The prepared service is available as `server.repository`; forked consumers receive its root through `SERVER_REPOSITORY_ROOT`.
+
+Master shutdown broadcasts the existing worker shutdown instruction and awaits worker exits. Finalization then attempts exactly one commit-and-push of the current branch, within the smaller of the repository timeout and the remaining shutdown budget. A single-process server first quiesces its local services. An independent worker restart never triggers repository checkpointing. If the shutdown deadline expires while workers are still active, finalization skips the checkpoint rather than saving a potentially changing checkout. Errors are reported without preventing shutdown.
+
+Git is executed locally. `repository.api` references an enabled record in this node organization's `apis` array by ID or name; when the URL comes from signup metadata, `git.api` supplies the default reference. Signup deploy-key profiles use `authentication: 'ssh-deploy-key'` and contain the private/public key, matching `repository_url`, deploy-key ID and GitHub `knownHosts`. Credentials are read afresh before managed clone/push operations. The master caches the SSH identity and host keys under the reserved `<localFsRoot>/<organization_id>/.ai` directory with mode 0600 and invokes SSH noninteractively with strict host checking and that specific identity. It never disables host verification or puts the key inside the checkout. Other trusted server consumers may request the same command environment through `server.repository.environment()`.
+
+The deploy key has no scheduled expiration or automatic rotation. Tenant API data is the source of truth; future rotation can update it. Standard Git credentials still work when no API reference is configured. CoCreate API keys do not authenticate Git. Signup repository/template/config/branch/deploy-key registration continues to use GitHub HTTP endpoints separately. Git `user.name` and `user.email` identify commit authors; they do not authenticate clone/push.
+
+Checkpoints never force-push. Default exclusions cover environment files, private key files and node_modules; staged excluded files cause a failure instead of a commit. A failed push retains its local commit. SIGKILL/power loss can interrupt saving. Normal explicit commits remain the primary save mechanism. Initial application publication via `coc upload` is separate and is not performed here.

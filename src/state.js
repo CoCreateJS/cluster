@@ -28,8 +28,56 @@ let fallbackHttpsServer = null;
 
 let stateConfig = {
     shutdownTimeoutMs: 15000,
+    shutdownHandlersTimeoutMs: 10000,
     meshCloseDelayMs: 1500
 };
+
+/** Give process-owned services a bounded cleanup window before this process exits. */
+export function runShutdownHandlers(reason) {
+    if (server.state?.shutdownHandlersPromise) return server.state.shutdownHandlersPromise;
+    const handlers = [...(server.shutdownHandlers || [])];
+    if (!handlers.length) return Promise.resolve();
+    const controller = new AbortController();
+    const timeoutMs = Math.max(1, Number(stateConfig.shutdownHandlersTimeoutMs) || 10000);
+    let timer;
+    const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            const error = new Error('Service shutdown deadline exceeded.');
+            controller.abort(error);
+            reject(error);
+        }, timeoutMs);
+    });
+    const hooks = Promise.allSettled(handlers.map(handler => {
+        try { return Promise.resolve(handler(reason, controller.signal)); }
+        catch (error) { return Promise.reject(error); }
+    })).then(results => {
+        for (const result of results) {
+            if (result.status === 'rejected')
+                console.error('[@cocreate/cluster] Service shutdown handler failed:', result.reason?.message || 'Unknown error');
+        }
+    });
+    const pending = Promise.race([hooks, deadline]).catch(error => {
+        console.error('[@cocreate/cluster] Service shutdown handler failed:', error.message);
+    }).finally(() => clearTimeout(timer));
+    if (server.state) server.state.shutdownHandlersPromise = pending;
+    return pending;
+}
+
+/** Worker signals, application restarts, and master shutdown messages share cleanup. */
+export function shutdownWorker(reason) {
+    if (server.state?.workerShutdownPromise) return server.state.workerShutdownPromise;
+    if (server.state) server.state.isShuttingDown = true;
+    const pending = (async () => {
+        // Start services before drain tears down sockets and organization context.
+        const services = runShutdownHandlers(reason);
+        await drain(true, true);
+        await services;
+        await save('stopped');
+        process.exit(0);
+    })();
+    if (server.state) server.state.workerShutdownPromise = pending;
+    return pending;
+}
 
 /**
  * Loads state configuration using @cocreate/config and queries database overrides
@@ -76,17 +124,13 @@ function setupSignalHandlers() {
         ['SIGINT', 'SIGTERM', 'SIGBREAK'].forEach((signal) => {
             process.on(signal, async () => {
                 console.log(`\n[@cocreate/cluster] [WORKER ${server?.workerId}] Received ${signal}. Draining local connections...`);
-                await drain(true, true);
-                await save('stopped');
-                process.exit(0);
+                await shutdownWorker(signal);
             });
         });
 
         server?.on('shutdown', async () => {
             console.log(`[@cocreate/cluster] [WORKER ${server?.workerId}] Instructed by master to shutdown. Draining...`);
-            await drain(true, true);
-            await save('stopped');
-            process.exit(0);
+            await shutdownWorker('MASTER_SHUTDOWN');
         });
     }
 }
@@ -379,9 +423,7 @@ export async function restart(payload = {}, fromEvent = false) {
 
         console.log(`[@cocreate/cluster] [WORKER ${server.workerId}] Restart triggered. Commencing drain...`);
         await save('restarting');
-        await drain(true, true);
-        await save('stopped');
-        process.exit(0);
+        await shutdownWorker('API_RESTART');
     }
 }
 
@@ -460,6 +502,7 @@ export function shutdown(payload = {}, fromEvent = false) {
  */
 export async function triggerGlobalShutdown(reason, completionCallback) {
     if (!server.isPrimary || server.state?.isShuttingDown) return;
+    const shutdownDeadline = Date.now() + stateConfig.shutdownTimeoutMs;
 
     console.log(`\n[@cocreate/cluster] [MASTER] Commencing Global Shutdown Sequence (Reason: ${reason})...`);
     
@@ -473,6 +516,13 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
         } else if (reason === 'OS_REBOOT') {
             server.state.status = 'REBOOTING';
         }
+    }
+
+    // Run node-owned routing cleanup while CRUD/API services are still available.
+    try {
+        await server.routing?.remove(reason);
+    } catch (error) {
+        console.error('[@cocreate/cluster] Failed to withdraw node routing:', error.message);
     }
 
     // Immediately publish stopped state for master (clears PID and sets master.status = 'stopped')
@@ -499,13 +549,24 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
         }, stateConfig.meshCloseDelayMs);
     }
 
-    const finalizeShutdown = async () => {
-        if (server.state?.primaryShutdownTimeout) {
-            clearTimeout(server.state.primaryShutdownTimeout);
-            server.state.primaryShutdownTimeout = null;
-        }
-
-        await save('stopped');
+    let finalizing;
+    const finalizeShutdown = () => {
+        if (finalizing) return finalizing;
+        finalizing = (async () => {
+            if (server.state?.primaryShutdownTimeout) {
+                clearTimeout(server.state.primaryShutdownTimeout);
+                server.state.primaryShutdownTimeout = null;
+            }
+            // In single-process mode consumers such as AI live on the primary.
+            if (server.totalWorkers <= 1) await runShutdownHandlers(reason);
+            const remaining = shutdownDeadline - Date.now();
+            if (remaining > 0) {
+                try { await server.repository?.stop(reason, { timeoutMs: remaining }); }
+                catch { console.error('[@cocreate/cluster] Repository shutdown checkpoint failed or timed out.'); }
+            }
+            await save('stopped');
+        })();
+        return finalizing;
     };
 
     if (server.state) server.state.finalizeShutdown = finalizeShutdown;

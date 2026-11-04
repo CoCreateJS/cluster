@@ -44,6 +44,9 @@ import IPC from './ipc.js';
 import Storage from './storage.js';
 import State from './state.js';
 import Log from './log.js';
+import Routing from './routing.js';
+import ApiKey from './apikey.js';
+import Repository from './repository.js';
 
 /**
  * ClusterManager handles Node.js cluster process lifecycle, worker forks,
@@ -134,9 +137,9 @@ export class ClusterManager {
                     const workersReady = this.workers.size === this.totalWorkers &&
                         [...this.workers.values()].every((item) => item.isListening);
                     if (workersReady && this.server.state?.save) {
-                        this.server.state.save('running').catch((error) => {
+                        this.server.state.save('running').then(() => this.server.routing?.add()).catch((error) => {
                             console.error(
-                                '[@cocreate/cluster] Failed to publish master readiness:',
+                                '[@cocreate/cluster] Failed to publish master readiness or routing:',
                                 error.message
                             );
                         });
@@ -199,7 +202,7 @@ export class ClusterManager {
 
                 if (this.workers.size === 0) {
                     console.log("[@cocreate/cluster] [MASTER] All workers successfully drained.");
-                    if (this.server.state.masterShutdownTimeout) clearTimeout(this.server.state.masterShutdownTimeout);
+                    if (state?.isShuttingDown) await state.finalizeShutdown?.();
                     if (typeof this.server.state.shutdownCompletionCallback === 'function') {
                         this.server.state.shutdownCompletionCallback();
                     } else if (state?.isShuttingDown) {
@@ -332,6 +335,11 @@ export class CoCreateServer {
         this.cluster.configureWorkers(config.workers);
 
         this.crud = await CrudServer.init(this);
+        try {
+            await ApiKey.init(this);
+        } catch {
+            console.error('[@cocreate/cluster] Unable to initialize the node organization API key.');
+        }
         this.authenticate = authenticate.init(this);
         this.mesh = ServerMesh;
         this.api = await ApiServer.init(this);
@@ -397,6 +405,8 @@ export class CoCreateServer {
             }
 
             this.workers = this.cluster.workers; // Direct reference to the workers Map instance
+            this.routing = await Routing.init(this);
+            this.repository = await Repository.init(this);
 
             if (this.totalWorkers > 1) {
                 await this.cluster.setupMasterCluster();
@@ -491,6 +501,17 @@ export class CoCreateServer {
 
             // Publish worker active running state object to DB upon creation/startup
             await this.state.save('running');
+        }
+
+        if (this.isPrimary && this.routing) {
+            await Promise.all([this.http, this.https].map(listener => listener.listening
+                ? Promise.resolve()
+                : new Promise(resolve => listener.once('listening', resolve))));
+            try {
+                await this.routing.add();
+            } catch (error) {
+                console.error('[@cocreate/cluster] Failed to register node routing:', error.message);
+            }
         }
 
         return this;
