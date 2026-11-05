@@ -280,7 +280,8 @@ test('worker-originated server targets are forwarded into the mesh', () => {
     assert.equal(meshMessages[0].serverId, 'server-1');
 });
 
-test('organization messages route only to registered workers and exclude their origin', () => {
+test('organization messages route only to registered workers and exclude their origin', async t => {
+    isolateClusterListeners(t);
     const received = [];
     const meshMessages = [];
     const openedOrganizations = [];
@@ -320,7 +321,17 @@ test('organization messages route only to registered workers and exclude their o
 
     assert.deepEqual([...server.organizationWorkers.get('organization-1')], [1, 2]);
     assert.deepEqual(received.map(item => item.id), [2]);
-    assert.equal(received[0].payload.socketDelivery, true);
+    const deliveries = [];
+    const previousListeners = new Set(process.listeners('message'));
+    IPC.init({
+        isPrimary: false,
+        wsManager: { send: payload => deliveries.push(payload) },
+        emit() { assert.fail('Organization delivery must not execute the operation again'); }
+    }, new Map());
+    const workerListener = process.listeners('message').find(listener => !previousListeners.has(listener));
+    t.after(() => process.removeListener('message', workerListener));
+    await workerListener(received[0].payload);
+    assert.deepEqual(deliveries, [{ ...received[0].payload, serverSent: true }]);
     assert.deepEqual(openedOrganizations, ['organization-1']);
     assert.equal(meshMessages.filter(item => item.uuid === 'organization-message').length, 1);
 
