@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { createWorkspaceResolver } from './repository-workspace.js';
+import { repositoryPaths, ensureRepositoryPaths } from './workspace.js';
 
 const execFileAsync = promisify(execFile);
 const defaultExcludes = ['.env', '.env.*', '**/.env', '**/.env.*', '**/*.pem', '**/*.key', 'node_modules/**'];
@@ -45,7 +45,7 @@ export async function authenticatedRepositoryEnvironment(server, settings, remot
     } catch { throw new Error('Repository SSH private key is invalid.'); }
     const lines = typeof profile.knownHosts === 'string' ? profile.knownHosts.trim().split('\n') : [];
     if (!lines.length || lines.some(line => !/^github\.com (ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256) [A-Za-z0-9+/]+={0,2}$/.test(line))) throw new Error('Repository SSH host verification keys are missing.');
-    const metadata = await createWorkspaceResolver(settings.localFsRoot, '.ai').ensure(server.organization_id);
+    const { metadata } = await ensureRepositoryPaths({ ...settings, url: remoteUrl }, server.projectRoot);
     const base = path.join(metadata, `git-${createHash('sha256').update(settings.api).digest('hex')}`);
     const atomicWrite = async (target, value) => {
         const temporary = `${target}.${randomUUID()}`;
@@ -68,13 +68,13 @@ export async function authenticatedRepositoryEnvironment(server, settings, remot
 export async function saveRepository({ server, localFsRoot, settings = {}, reason = 'shutdown', signal }) {
     if (!server.organization_id || !/^[A-Za-z0-9_-]+$/.test(server.organization_id)) throw new Error('Repository shutdown requires the platform organization.');
     signal?.throwIfAborted();
-    const workspace = createWorkspaceResolver(localFsRoot).organizationRoot(server.organization_id);
+    const { root: configuredRoot, workspace } = repositoryPaths({ ...settings, localFsRoot: localFsRoot || settings.localFsRoot }, server.projectRoot);
     try {
         const stats = await fs.lstat(path.join(workspace, '.git'));
         if (!stats.isDirectory() || stats.isSymbolicLink()) throw new Error('Repository shutdown requires a local Git directory.');
-        const root = await fs.realpath(localFsRoot);
+        const root = await fs.realpath(configuredRoot);
         const resolved = await fs.realpath(workspace);
-        if (resolved !== path.join(root, server.organization_id, 'sites')) throw new Error('Repository shutdown path escapes the configured workspace.');
+        if (resolved !== path.join(root, path.basename(workspace))) throw new Error('Repository shutdown path escapes the configured workspace.');
     } catch (error) {
         if (error.code === 'ENOENT') return { skipped: true, reason: 'no-checkout' };
         throw error;

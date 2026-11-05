@@ -20,8 +20,9 @@ import { WebSocket } from 'ws';
  * and server events requiring outbound dispatch.
  */
 export class ServerMeshOutbound {
-    constructor(mesh) {
+    constructor(mesh, WebSocketClass = WebSocket) {
         this.mesh = mesh;
+        this.WebSocket = WebSocketClass;
         this.server = null;
         this.meshPort = process.env.MESH_PORT || 8090;
         this.retryTimers = new Map();
@@ -71,7 +72,7 @@ export class ServerMeshOutbound {
     }
 
     /**
-     * Queries database for existing peer server records (READ ONLY) and triggers outbound connection setup.
+     * Queries older running peers (READ ONLY) and triggers outbound connection setup.
      */
     async getServers() {
         if (!this.server?.crud) return;
@@ -80,7 +81,7 @@ export class ServerMeshOutbound {
             method: 'object.read',
             array: 'servers',
             filter: {
-                query: { _id: { $lt: this.server.id } },
+                query: { _id: { $lt: this.server.id }, 'master.status': 'running' },
                 sort: { _id: 1 },
                 limit: 0
             },
@@ -130,7 +131,7 @@ export class ServerMeshOutbound {
                 ? `/${encodeURIComponent(organization_id)}`
                 : '';
             const targetUrl = `wss://${targetIp}:${this.meshPort}${path}`;
-            const clientSocket = new WebSocket(targetUrl, [
+            const clientSocket = new this.WebSocket(targetUrl, [
                 encodeURIComponent(JSON.stringify({
                     type: 'peer',
                     ip: this.server.ip,
@@ -177,12 +178,12 @@ export class ServerMeshOutbound {
 
             });
 
-            clientSocket.on('close', () => {
+            clientSocket.on('close', (code) => {
                 this.mesh.activeConnections.delete(connectionKey);
                 this.retryTimers.delete(connectionKey);
                 this.mesh.removeSocketFromAllOrgServers(clientSocket);
 
-                if (this.mesh.isClosed || clientSocket.intentionalClose) return;
+                if (this.mesh.isClosed || clientSocket.intentionalClose || code === 1000) return;
                 if (organization_id && !this.mesh.organizations.has(organization_id)) return;
 
                 if (retryCount < maxRetries) {

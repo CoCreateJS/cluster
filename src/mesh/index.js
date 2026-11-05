@@ -49,7 +49,10 @@ export class ServerMesh extends EventEmitter {
             this.organizations.set(organization_id, []);
         }
         const sockets = this.organizations.get(organization_id);
-        if (!sockets.includes(ws)) sockets.push(ws);
+        if (!sockets.includes(ws)) {
+            sockets.push(ws);
+            this.emit('organization.active', { organization_id });
+        }
     }
 
     addControlSocket(ws) {
@@ -60,10 +63,40 @@ export class ServerMesh extends EventEmitter {
 
     openOrganization(organization_id) {
         if (!organization_id || !this.server?.isPrimary) return;
+        this.emit('organization.active', { organization_id });
         if (!this.organizations.has(organization_id)) {
             this.organizations.set(organization_id, []);
         }
+        // Provisioning is optional and platform-owned; transport ordering stays unchanged.
+        if (this.server.manager?.config.enabled && organization_id !== this.server.organization_id) {
+            this.checkOrganizationServers(organization_id).catch(() => {
+                // TODO: Preserve failure classification from the workflow/API.
+                // Confirmed transient network failures: retry with bounded attempts;
+                // reconcile an uncertain launch outcome before resubmitting creation.
+                // Otherwise (configuration/code/provider rejection or no instance ID),
+                // TODO: Notify the platform for early resolution; do not retry automatically.
+                console.error('[@cocreate/cluster] Initial organization server provisioning needs review:', organization_id);
+            });
+        }
         this.announceOrganization(organization_id);
+    }
+
+    async checkOrganizationServers(organization_id) {
+        const read = async (array, query) => {
+            const result = await this.server.crud.send({
+                method: 'object.read', array, filter: { query, limit: 0 },
+                organization_id: this.server.organization_id, host: this.server.host
+            });
+            if (!result || result.success === false || !Array.isArray(result.object) ||
+                (Array.isArray(result.error) ? result.error.length : result.error)) {
+                throw new Error(`Unable to read organization ${array}.`);
+            }
+            return result.object;
+        };
+        const [cluster] = await read('clusters', { type: 'organization', 'manager.for': organization_id, 'manager.organization_id': this.server.organization_id });
+        if (!cluster) return;
+        const servers = await read('servers', { cluster_id: cluster._id, 'master.status': 'running' });
+        if (!servers.length) return this.server.manager.createServer(cluster);
     }
 
     announceOrganization(organization_id, socket) {
@@ -84,9 +117,11 @@ export class ServerMesh extends EventEmitter {
 
     closeOrganization(organization_id) {
         if (!organization_id || !this.server?.isPrimary) return;
+        this.emit('organization.inactive', { organization_id });
         this.outboundManager.closeOrganization(organization_id);
         const sockets = this.organizations.get(organization_id);
         if (!sockets) return;
+        this.socketSend(sockets, { method: 'mesh.orgDeleted', organization_id, serverId: this.server.id });
         this.organizations.delete(organization_id);
         for (const ws of sockets) {
             if (ws.isControlSocket) continue;
@@ -94,7 +129,7 @@ export class ServerMesh extends EventEmitter {
             for (const [key, socket] of this.activeConnections) {
                 if (socket === ws) this.activeConnections.delete(key);
             }
-            try { ws.close(); } catch {}
+            try { ws.close(1000); } catch {}
         }
     }
 
@@ -227,6 +262,7 @@ export class ServerMesh extends EventEmitter {
                 if (index !== -1) sockets.splice(index, 1);
                 if (sockets.length === 0) {
                     this.organizations.delete(organization_id);
+                    this.emit('organization.inactive', { organization_id });
                 }
                 console.log(`[@cocreate/server-mesh] Peer ${peerId} de-registered subscription from org "${organization_id}"`);
             }
@@ -466,7 +502,7 @@ export class ServerMesh extends EventEmitter {
  * @private
  * @environment server
  */
-    async close() {
+    async close(reason = 'OS_SHUTDOWN') {
         if (this.isClosed) return;
         this.isClosed = true;
 
@@ -481,7 +517,7 @@ export class ServerMesh extends EventEmitter {
             if (ws && ws.readyState === 1) {
                 try {
                     ws.intentionalClose = true;
-                    ws.close();
+                    ws.close(reason === 'OS_SHUTDOWN' ? 1000 : 1012);
                 } catch {}
             }
         }

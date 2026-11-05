@@ -172,7 +172,13 @@ async function persistLifecycle(payload, attempts = 5) {
                     ? [response.error]
                     : [];
 
-            if (!errors.length) return response;
+            if (!errors.length) {
+                if (server.manager?.organization_id) {
+                    try { await server.manager.send(payload, { timeoutMs: 3000 }); }
+                    catch { console.error('[@cocreate/cluster] Unable to mirror server state to its manager.'); }
+                }
+                return response;
+            }
             lastError = new Error(errors
                 .map((error) => error?.message || String(error))
                 .join('; '));
@@ -196,6 +202,20 @@ async function persistLifecycle(payload, attempts = 5) {
  * @param {string} [overrideStatus] - Optional status override (e.g. 'stopped', 'restarting')
  */
 export async function save(overrideStatus) {
+    if (server?.crud) {
+        const current = await server.crud.send({
+            method: 'object.read',
+            array: 'servers',
+            filter: { query: { _id: server.id }, limit: 1 },
+            organization_id: server.organization_id,
+            host: server.host
+        });
+        if (current.success === false || !Array.isArray(current.object) ||
+            (Array.isArray(current.error) ? current.error.length : current.error)) {
+            throw new Error('Unable to read server status before saving state.');
+        }
+        if (['failed', 'terminating'].includes(current.object?.[0]?.master?.status)) return;
+    }
     if (server?.isPrimary) {
         const masterStatus = overrideStatus || (server.state?.isShuttingDown ? 'stopped' : 'running');
         const isPrimaryStopped = masterStatus === 'stopped';
@@ -525,7 +545,7 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
         console.error('[@cocreate/cluster] Failed to withdraw node routing:', error.message);
     }
 
-    // Immediately publish stopped state for master (clears PID and sets master.status = 'stopped')
+    // Publish stopped state unless the server already has a failed/terminating outcome.
     await save('stopped');
 
     // Step 1: Execute primary drain
@@ -542,7 +562,7 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
         
         setTimeout(() => {
             if (server.mesh && typeof server.mesh.close === 'function') {
-                server.mesh.close();
+                server.mesh.close(reason);
             }
             if (server.state) server.state.isMeshClosed = true;
             console.log("[@cocreate/cluster] [MASTER] Mesh closed successfully.");

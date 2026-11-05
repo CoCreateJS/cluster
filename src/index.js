@@ -40,13 +40,14 @@ import Usage from '@cocreate/usage';
 import { ObjectId, getClientInfo } from '@cocreate/utils';
 
 import getInfrastructure from './getInfrastructure.js';
+import Manager from './manager.js';
 import IPC from './ipc.js';
 import Storage from './storage.js';
 import State from './state.js';
 import Log from './log.js';
 import Routing from './routing.js';
 import ApiKey from './apikey.js';
-import Repository from './repository.js';
+import Repository from './repository/index.js';
 
 /**
  * ClusterManager handles Node.js cluster process lifecycle, worker forks,
@@ -122,7 +123,8 @@ export class ClusterManager {
             SERVER_ID: String(this.server.id || ''),
             SERVER_IP: String(this.server.ip || '127.0.0.1'),
             SERVER_INFRASTRUCTURE: JSON.stringify(this.server.infrastructure || {}),
-            SERVER_LOCATION: JSON.stringify(this.server.location || {})
+            SERVER_LOCATION: JSON.stringify(this.server.location || {}),
+            SERVER_MANAGER: JSON.stringify(this.server.manager || {})
         });
 
         const handleWorkerListeningMsg = (workerId, msg) => {
@@ -137,9 +139,13 @@ export class ClusterManager {
                     const workersReady = this.workers.size === this.totalWorkers &&
                         [...this.workers.values()].every((item) => item.isListening);
                     if (workersReady && this.server.state?.save) {
-                        this.server.state.save('running').then(() => this.server.routing?.add()).catch((error) => {
+                        this.server.state.save('running').then(async () => {
+                            try { await this.server.routing?.add(); }
+                            catch { console.error('[@cocreate/cluster] Failed to register node routing.'); }
+                            await this.server.repository?.publish();
+                        }).catch((error) => {
                             console.error(
-                                '[@cocreate/cluster] Failed to publish master readiness or routing:',
+                                '[@cocreate/cluster] Failed to publish master readiness or initial repository data:',
                                 error.message
                             );
                         });
@@ -344,6 +350,7 @@ export class CoCreateServer {
         this.mesh = ServerMesh;
         this.api = await ApiServer.init(this);
         this.workflow = await Workflow.init(this);
+        this.manager = await Manager.init(this);
 
         if (this.isPrimary) {
             console.log(`[@cocreate/cluster] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);
@@ -380,6 +387,12 @@ export class CoCreateServer {
                 if (response?.error?.length || (response?.error && !Array.isArray(response.error)) ||
                     !Array.isArray(response?.object))
                     throw new Error('Unable to read the previous worker profile.');
+
+                const persistedServer = response.object[0];
+                if (persistedServer?.manager) {
+                    const { organization_id, host, apiKey } = persistedServer.manager;
+                    Object.assign(this.manager, { organization_id, host, apiKey });
+                }
 
                 for (const field of Object.keys(response?.object?.[0] || {})) {
                     const match = /^worker([1-9]\d*)$/.exec(field);
@@ -514,6 +527,11 @@ export class CoCreateServer {
             }
         }
 
+        if (this.isPrimary) {
+            try { await this.repository?.publish(); }
+            catch { console.error('[@cocreate/cluster] Initial repository publication failed; inspect its reservation and retry on a later startup.'); }
+        }
+
         return this;
     }
 
@@ -568,6 +586,16 @@ export class CoCreateServer {
                 if (res.writableEnded || res.headersSent) {
                     return;
                 }
+            }
+
+            if (reqPath === '/manager' || reqPath.startsWith('/manager/')) {
+                return this.manager.http(req, res);
+            }
+            if (reqPath === '/api' || reqPath.startsWith('/api/')) {
+                return this.api.http(req, res);
+            }
+            if (reqPath.startsWith('/workflows/')) {
+                return this.workflow.http(req, res);
             }
 
             // 2. Default route handling: API webhooks

@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { authenticatedRepositoryEnvironment } from '../src/repository-git.js';
+import { authenticatedRepositoryEnvironment } from '../src/repository/git.js';
+import { repositoryPaths } from '../src/repository/workspace.js';
 
 const exec = promisify(execFile);
 const api = '6b0500000000000000000021';
@@ -36,7 +37,7 @@ test('master reads the tenant API deploy key and configures noninteractive, veri
     assert.ok(!JSON.stringify(env).includes(credential.privateKey));
     assert.match(env.GIT_SSH_COMMAND, /StrictHostKeyChecking=yes/);
     assert.match(env.GIT_SSH_COMMAND, /BatchMode=yes/);
-    const metadata = path.join(localFsRoot, 'tenant', '.ai');
+    const metadata = repositoryPaths({ localFsRoot, url: remote }).metadata;
     const files = await fs.readdir(metadata);
     const identity = path.join(metadata, files.find(file => file.endsWith('.pem')));
     assert.equal((await fs.stat(identity)).mode & 0o777, 0o600);

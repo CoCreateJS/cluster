@@ -114,7 +114,7 @@ export class ServerMeshInbound {
                 organization_id &&
                 !this.mesh.organizations.has(organization_id)
             ) {
-                ws.close();
+                ws.close(1000);
                 return;
             }
             let remoteServerId = null;

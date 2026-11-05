@@ -28,7 +28,7 @@ async function setup(t, remove) {
             await remove?.();
             order.push('removed');
         } },
-        crud: { send: async request => { order.push('persist'); return { object: [request.object] }; } },
+        crud: { send: async request => { if (request.method === 'object.read') return { object: [] }; order.push('persist'); return { object: [request.object] }; } },
         send: () => order.push('shutdown-workers')
     };
     server.state = await State.init(server);
@@ -48,6 +48,46 @@ test('coordinated shutdown awaits routing removal before lifecycle persistence a
     assert.equal(order.at(-1), 'exit');
     await triggerGlobalShutdown('SIGINT');
     assert.equal(order.filter(event => event.startsWith('remove:')).length, 1);
+});
+
+for (const status of ['failed', 'terminating']) {
+    test(`ordinary state saves leave ${status} untouched`, async t => {
+        const { server } = await setup(t);
+        const methods = [];
+        server.crud.send = async request => {
+            methods.push(request.method);
+            return { object: [{ master: { status } }] };
+        };
+        await server.state.save();
+        await server.state.save('stopped');
+        assert.deepEqual(methods, ['object.read', 'object.read']);
+    });
+    test(`shutdown completes without saving over ${status}`, async t => {
+        const { server, order, triggerGlobalShutdown } = await setup(t);
+        const requests = [];
+        server.crud.send = async request => {
+            requests.push(request);
+            return { object: [{ _id: server.id, master: { status } }] };
+        };
+        await triggerGlobalShutdown('OS_SHUTDOWN', () => order.push('poweroff'));
+        t.mock.timers.tick(1000);
+        assert.equal(order.at(-1), 'poweroff');
+        assert.ok(order.includes('shutdown-workers'));
+        assert.equal(requests.length, 2);
+        assert.ok(requests.every(request => request.method === 'object.read'));
+        assert.equal(requests[0].filter.query._id, server.id);
+    });
+}
+
+test('a failed status read prevents an unchecked lifecycle write', async t => {
+    const { server } = await setup(t);
+    const methods = [];
+    server.crud.send = async request => {
+        methods.push(request.method);
+        return { error: ['Database unavailable.'] };
+    };
+    await assert.rejects(server.state.save('stopped'), /Unable to read server status/);
+    assert.deepEqual(methods, ['object.read']);
 });
 
 test('a failed routing workflow is reported and does not prevent existing shutdown cleanup', async t => {

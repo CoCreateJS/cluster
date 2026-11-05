@@ -109,6 +109,93 @@ The server composes multiple standalone CoCreate modules into a unified runtime.
 
 ## Programmatic API Reference
 
+### Built-in server manager
+
+Cluster initializes `server.manager` after CRUD. Its persisted fields are
+`organization_id`, `host` and `apiKey`; a null organization ID means unmanaged.
+The existing primary inventory read hydrates those fields, and fork configuration
+passes them to workers without another database lookup. The runtime `send`
+function is non-enumerable and is not copied into inventory records.
+
+```js
+if (server.manager.organization_id) {
+    await server.manager.send(existingEnvelope);
+}
+```
+
+`send` POSTs the envelope to `https://<manager.host>/manager`, with the credential
+in the Authorization Bearer header and caller scope removed from JSON. Manager.http delegates provider requests to API.http, which authorizes before
+API.send. Manager resolves parent scope and authorizes server/cluster inventory
+object.update requests before dispatching to CRUD. The manager handler does
+not invoke state.save, preventing mirrored-state loops. Existing API/workflow HTTP
+routes remain available independently.
+
+State's existing persistence helper mirrors successful state.save envelopes once
+after the local write. Each worker sends its existing worker section; the primary
+sends its existing master/node section. Mirror delivery has a three-second timeout;
+failure is logged without failing or repeating local persistence. There is no
+delivery queue or replay, and direct CRUD writes outside this path are not captured.
+Telemetry is not mirrored.
+
+AutoScaler uses manager.send at its existing send points and preserves its drain,
+capacity and recovery sequence. Unmanaged nodes retain server.api.send. Initial
+server creation persists the manager credential in both inventory copies; future
+scale-out reservations copy its connection fields. Cluster-key permissions allow
+instance endpoints and server/cluster updates. Cluster/provider AST predicates, metadata
+preparation, bootstrap handling and initial provider-result synchronization remain
+separate work; this service does not imply those integrations are complete.
+
+### HTTP API and workflow requests
+
+Cluster routes `/api` and its `/api/…` subpaths to `server.api.http(req, res)` and
+`POST /workflows/<name>` to `server.workflow.http(req, res)`, following the existing
+`server.api.webhook(req, res)` entrance pattern. `/manager` and `/manager/…` subpaths
+similarly reach `server.manager.http`. Prefixes respect path segment boundaries,
+so `/apis` and `/managerial` retain normal routing. The API HTTP handler still
+requires `endpoint` in its JSON envelope; path-based endpoint extraction is a
+separate future change. Each module resolves organization
+scope from the hostname and authorizes before execution. The former
+`src/http-operations.js` adapter is removed. Denial, authorization errors or a
+missing authorization service return 403. The shared `server.authorize.request`
+helper checks permission, preserves the sanitized envelope, rejects changes to
+scope/operation targets, and strips the transport API key. Default/key permission merging is
+unchanged, with no extra key-record lookup.
+
+Send `Content-Type: application/json` and an `Authorization: Bearer <key>` header,
+or supply the existing envelope's `apikey` field. Without a key, authorization
+evaluates its normal default permissions. Conflicting header/body keys are
+rejected. Caller-supplied socket/user identity and organization/host scope are
+not trusted. The authorized, sanitized envelope is used for execution, with the
+transport API key removed. Responses use `Cache-Control: no-store`; bodies are
+limited to 1 MiB and only POST is supported.
+
+Example body for `/api`:
+
+```json
+{
+  "api": "configured-provider",
+  "endpoint": "configured-operation",
+  "method": "post",
+  "data": { "cluster_id": "cluster-document-id" }
+}
+```
+
+The adapter requires `api`, `endpoint` and `method`; the direct `url` shortcut is
+not exposed. Authorization evaluates the existing envelope method, such as
+`post`, rather than a new `api.send` permission. Configure operation/data
+restrictions instead of granting an unrestricted HTTP verb for managed scaling.
+
+Example body for `/workflows/example`:
+
+```json
+{ "example": [{ "input": "value" }] }
+```
+
+The adapter sets `method: "workflow.example"`; an explicit method must match the
+path. No permissions are granted by these routes. `/webhooks/*` retains its AST
+handler, and trusted custom `server.routes` retain their existing precedence.
+Managed credentials and parent dispatch remain separate integration work.
+
 ### Node API key initialization
 
 After CRUD initializes, the primary runs `src/apikey.js` to read one
@@ -663,31 +750,135 @@ For open-source projects and non-commercial use, this software is available unde
 
 Organizations requiring proprietary use may obtain a commercial license from CoCreate.
 
-## Node repository
+## Cluster repositories
 
-The primary owns one shared repository independently of AI. It reads the global `repository` config and scoped `servers_config` records with `type: "repository"`, applying database overrides. Defaults are:
+New signup and repository startup default to `main`, so the first upload targets the primary tenant hostname. Explicit branch choices remain supported; dev/test environment flows can be selected later.
+
+The cluster document owns a `repositories` array. URL is each entry's identity;
+no generated repository entry ID is used. The primary queries its own cluster
+once during repository initialization, before workers fork. Global repository
+config and servers_config type repository records are no longer loaded. The old
+App repository server-config seed is removed; existing records of that type are
+ignored. Organization git metadata remains descriptive and is not a startup
+configuration fallback.
 
 ```js
-{
-    enabled: true,
-    url: "", // falls back to the server organization's git.clone_url
-    api: "", // tenant apis record ID/name; defaults to organization.git.api
-    branch: "dev",
-    remote: "origin",
-    localFsRoot: "<working-directory>/organizations",
-    onStartup: "clone",
-    onShutdown: "commit-and-push",
+repositories: [{
+    url: 'git@github.com:owner/project.git',
+    api: '<tenant repository credential record ID>',
+    branch: 'main',
+    remote: 'origin',
+    localFsRoot: '../',
+    directory: 'project',
+    onStartup: 'clone',
+    onShutdown: 'commit-and-push',
     startupTimeoutMs: 60000,
-    shutdownTimeoutMs: 10000
-}
+    shutdownTimeoutMs: 10000,
+    initialUpload: { enabled: true, completed: false }
+}]
 ```
 
-Before workers fork, the master clones a missing repository into `<localFsRoot>/<organization_id>/sites` and selects the configured branch. Missing repository metadata is a no-op. An existing checkout is reused without pulling/resetting; switching branches requires a clean working tree and a matching remote. A configured checkout failure prevents worker startup. Set `enabled: false` to disable lifecycle handling, or set either action to `false` independently. The prepared service is available as `server.repository`; forked consumers receive its root through `SERVER_REPOSITORY_ROOT`.
+Relative localFsRoot resolves against server.projectRoot or the running project's
+working directory; absolute roots are also supported. The checkout is directly
+<resolved-root>/<directory>, normally a sibling of the running server project.
+If directory is omitted, it derives from the repository URL name. Duplicate URLs
+or checkout destinations fail before cloning, and the running project itself
+cannot be a checkout destination. There is no organization/sites nesting.
 
-Master shutdown broadcasts the existing worker shutdown instruction and awaits worker exits. Finalization then attempts exactly one commit-and-push of the current branch, within the smaller of the repository timeout and the remaining shutdown budget. A single-process server first quiesces its local services. An independent worker restart never triggers repository checkpointing. If the shutdown deadline expires while workers are still active, finalization skips the checkpoint rather than saving a potentially changing checkout. Errors are reported without preventing shutdown.
+Each configured checkout is cloned if missing. Existing checkouts are reused
+without pulling/resetting; startup branch switches require a clean checkout and
+a matching remote. Set enabled:false, onStartup:false or onShutdown:false on an
+entry to control its lifecycle. Workers share the primary's prepared checkouts.
 
-Git is executed locally. `repository.api` references an enabled record in this node organization's `apis` array by ID or name; when the URL comes from signup metadata, `git.api` supplies the default reference. Signup deploy-key profiles use `authentication: 'ssh-deploy-key'` and contain the private/public key, matching `repository_url`, deploy-key ID and GitHub `knownHosts`. Credentials are read afresh before managed clone/push operations. The master caches the SSH identity and host keys under the reserved `<localFsRoot>/<organization_id>/.ai` directory with mode 0600 and invokes SSH noninteractively with strict host checking and that specific identity. It never disables host verification or puts the key inside the checkout. Other trusted server consumers may request the same command environment through `server.repository.environment()`.
+The runtime service remains server.repository, with entries available in
+server.repository.repositories. The first enabled prepared checkout is the
+default AI workspace. Workers receive its path and platform organization through
+SERVER_REPOSITORY_ROOT and SERVER_REPOSITORY_ORGANIZATION_ID. AI uses that actual
+checkout rather than creating another organization/sites directory. Its platform
+access restrictions remain in place. Other consumers can select another entry's
+checkout.workspace; authenticated Git environments can be requested by URL with
+server.repository.environment(url).
 
-The deploy key has no scheduled expiration or automatic rotation. Tenant API data is the source of truth; future rotation can update it. Standard Git credentials still work when no API reference is configured. CoCreate API keys do not authenticate Git. Signup repository/template/config/branch/deploy-key registration continues to use GitHub HTTP endpoints separately. Git `user.name` and `user.email` identify commit authors; they do not authenticate clone/push.
+Shutdown attempts each enabled repository's commit-and-push once, preserving its
+current branch. Each operation is bounded by its entry timeout and the remaining
+node shutdown budget; a failed repository does not silently skip all later ones.
+Errors are reported without preventing node shutdown. Credentials still come
+from the node organization's enabled apis records, with repository URL matching
+and strict SSH host verification. Keys/cache/staging live outside checkouts under
+<resolved-root>/.cocreate/repositories/<URL hash>, never in Git.
 
-Checkpoints never force-push. Default exclusions cover environment files, private key files and node_modules; staged excluded files cause a failure instead of a commit. A failed push retains its local commit. SIGKILL/power loss can interrupt saving. Normal explicit commits remain the primary save mechanism. Initial application publication via `coc upload` is separate and is not performed here.
+After checkout and node listener readiness, the primary calls repository.publish.
+Entries with initialUpload.enabled:true and completed:false run coc upload from
+their checkout; disabled or completed entries are skipped. The CLI must be
+available on PATH, with runtime/global CoCreate credentials and a reachable target
+from CoCreate.config.js. No credentials are inserted into Git or CLI arguments.
+
+A repository_upload_reservations record keyed by cluster+URL prevents concurrent
+nodes from running the initial upload. The primary memoizes publish so repeated
+worker-ready events do not launch it twice; workers never call it. Publication
+rereads the URL entry and sets initialUpload.completed and completedAt only after
+the CLI exits successfully. The cluster patch is mirrored through the manager
+when configured; the tenant cluster remains the local publication authority.
+Failed uploads leave completion pending and release their reservation for a later
+startup. If the process crashes, or upload succeeds but completion persistence is
+uncertain, the reservation is retained for explicit reconciliation; no lease
+expiry blindly launches a duplicate. Shutdown aborts an in-flight upload and
+bounds the wait before attempting Git checkpoints. Later AI/change uploads are
+not gated by this initial flag.
+
+Existing clusters require their repositories array and runtime key permissions
+to be populated; no automatic migration from old repository configs or
+organization git metadata is performed.
+
+## Platform organization activation
+
+Manager exposes non-enumerable send(envelope), createServer(cluster), http and config
+properties; only parent connection fields are serialized. Initialization loads the
+platform organizationConnection settings after CRUD/API/workflows. Its enabled flag
+controls Mesh's optional creation hook; tenant signup does not copy that platform config.
+
+On activation, Mesh reads the organization-type cluster by manager.for (tenant organization ID) and
+manager.organization_id (platform ID), then its running servers in platform scope. This query uses cluster_id and master.status
+running, without peer discovery's smaller-ID filter. If no running server is returned,
+Mesh invokes manager.createServer(cluster). Nonrunning inventory, including failed
+records, does not block creation or get deleted by this decision.
+
+Manager executes the command without inventory eligibility queries, reservations or
+creation deduplication. It uses the supplied cluster.initialDeployment, provider profile,
+storage reference, hostname and runtime settings, resolving the tenant bootstrap
+source using cluster.manager.for for script preparation. Cluster.name is an editable label;
+cluster.manager stores organization_id, host and for in both database copies. initialDeployment
+and repositories remain top-level cluster configuration. Signup prepares those documents
+and repository registration before ready; later Mesh activation invokes VM creation. It creates platform and tenant inventory before dispatching
+the existing create-organization-server workflow, mirrors the provider patch, and retains
+the existing startup watchdog. Concurrent creation commands are allowed; ordinary
+AutoScaler policy handles excess running capacity. ensureServer is removed.
+
+## Mesh peer connection and close contract
+
+Outbound discovery already calls `connectPeer` for every returned server with a usable address, preserving the existing smaller-ID query and connection ordering. Cluster grouping and orchestrator-to-tenant links are unchanged.
+
+Outgoing sockets retry from their `close` handler. Normal close code 1000 now suppresses retries; explicit node shutdown and organization closure send that code. Restarts/reboots and uncertain signal exits use 1012, while network loss uses the transport's abnormal closure path and remains retryable. The existing ten-retry limit is unchanged. Failed-peer provider/inventory reconciliation remains a separate TODO; no automatic deletion or new diagnostic protocol is introduced.
+
+### Managed node startup confirmation
+
+Manager observes first-node creation and managed create-instance requests for two minutes after a successful instance-ID response. A matching authorized server update must persist successfully to confirm receipt. An early update arriving before the provider response is retained; an update handled by another managing worker/node is checked through persisted server status at timeout. Missing confirmation logs the server ID and leaves a TODO for platform notification and at most one optional replacement. No restart, deletion, retry or notification service is implemented by this watchdog. Timers are process-local and unreferenced; they do not survive a managing-process restart.
+
+### Accepted termination retains lifecycle records
+
+After the drain/capacity sequence, AutoScaler commits master.status terminating before the provider request. Success retains it; a termination error overrides it with failed. It then dispatches State shutdown to the selected server. State.save skips failed/terminating records while shutdown cleanup proceeds. Server inventory is retained briefly rather than deleted in the termination request.
+
+AutoScaler stores removal outcomes in master.status. Capacity/drain cancellations before provider dispatch restore running; termination failures remain failed. The separate decommission status object is no longer used; decommissionStrategy remains the policy configuration name.
+
+After persisting a managed server terminating update, Manager schedules cleanup once after one minute. It resolves the tenant scope from the stored cluster.manager.for and calls AutoScaler's shared deleteServer helper to delete the tenant and platform copies, without rechecking server status or calling the cloud provider. Duplicate reports do not postpone cleanup. A successfully persisted failed update cancels the pending timer directly. AutoScaler also sweeps its own cluster every ten minutes, starting ten minutes after initialization; managed sweeps request platform deletion through the authorized Manager object.delete servers operation. Already-missing records are successful deletions. Failed records are not selected. The management permission reference includes server-only deletion; existing issued keys require that grant for tenant-initiated platform cleanup. These process-local timers do not survive restarts.
+
+
+### Organization removal and scale-to-zero
+
+Mesh emits organization.active from activation and organization-socket registration,
+and organization.inactive from its existing close/removal callbacks. Organization close
+sends the existing mesh.orgDeleted frame before closing its sockets. AutoScaler consumes
+these confirmed signals for its own organization: minClusterSize zero permits the existing
+scaleIn lifecycle, while CPU/memory alone cannot remove the final node. Socket Server's
+existing grace period and IPC worker aggregation remain responsible for local activity
+tracking; the own organization can report idle without unloading services needed for shutdown.

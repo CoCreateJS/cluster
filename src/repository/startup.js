@@ -2,32 +2,16 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createWorkspaceResolver } from './repository-workspace.js';
-import { authenticatedRepositoryEnvironment } from './repository-git.js';
+import { ensureRepositoryPaths } from './workspace.js';
+import { authenticatedRepositoryEnvironment } from './git.js';
 
 const exec = promisify(execFile);
 
 /** Prepare this node's platform checkout before the primary forks consumers. */
 export async function initializeRepository({ server, config }) {
-    const settings = { branch: 'dev', remote: 'origin', ...config };
+    const settings = { branch: 'main', remote: 'origin', ...config };
     if (settings.enabled === false || settings.onStartup === false) return { skipped: true, reason: 'disabled' };
-    const workspaces = createWorkspaceResolver(config.localFsRoot);
-    // This identity comes from the server, never an AI request or tenant payload.
-    workspaces.organizationRoot(server.organization_id);
-    let url = settings.url;
-    if (!url) {
-        const response = await server.crud.send({
-            method: 'object.read', array: 'organizations', organization_id: server.organization_id, host: server.host,
-            filter: { query: { _id: server.organization_id }, key: { git: 1 }, limit: 1 }
-        });
-        if (response?.error?.length || (response?.error && !Array.isArray(response.error)) || response?.success === false || !Array.isArray(response?.object)) throw new Error('Could not resolve the platform repository.');
-        const git = response.object?.[0]?.git;
-        url = git?.clone_url;
-        if (!settings.api && git?.api) settings.api = git.api;
-        config.url = url;
-        config.api = settings.api;
-
-    }
+    const url = settings.url;
     if (!url) return { skipped: true, reason: 'not-configured' };
     if (typeof url !== 'string' || !url.trim() || url.startsWith('-')) throw new Error('Invalid repository URL.');
     const branch = settings.branch;
@@ -40,8 +24,7 @@ export async function initializeRepository({ server, config }) {
     let staging;
     try {
         const env = await authenticatedRepositoryEnvironment(server, settings, url, controller.signal);
-        const workspace = await workspaces.ensure(server.organization_id);
-        const metadata = await createWorkspaceResolver(config.localFsRoot, '.ai').ensure(server.organization_id);
+        const { workspace, metadata } = await ensureRepositoryPaths(settings, server.projectRoot);
         const git = async (args, cwd = workspace) => {
             controller.signal.throwIfAborted();
             try {

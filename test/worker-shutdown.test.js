@@ -23,7 +23,7 @@ async function setup(t) {
         closeEdgeListeners: () => order.push('cordon'),
         wsManager: { destroyAll: () => order.push('drain') },
         send: () => {},
-        crud: { send: async request => { order.push('save'); return { object: [request.object] }; } },
+        crud: { send: async request => { if (request.method === 'object.read') return { object: [] }; order.push('save'); return { object: [request.object] }; } },
         repository: { stop: () => { throw new Error('workers must not checkpoint repositories'); } },
         shutdownHandlers: new Set()
     };
@@ -48,6 +48,21 @@ test('worker shutdown starts services before drain and waits only for bounded cl
     await pending;
     assert.equal(order.at(-1), 'exit:0');
 });
+
+for (const status of ['failed', 'terminating']) {
+    test(`worker exits without saving over master ${status}`, async t => {
+        const { server, order, shutdownWorker } = await setup(t);
+        const methods = [];
+        server.crud.send = async request => {
+            methods.push(request.method);
+            return { object: [{ master: { status } }] };
+        };
+        await shutdownWorker('MASTER_SHUTDOWN');
+        assert.deepEqual(methods, ['object.read']);
+        assert.ok(order.includes('drain'));
+        assert.equal(order.at(-1), 'exit:0');
+    });
+}
 
 test('master message, direct worker signals, and worker restart each invoke local services', async t => {
     for (const trigger of ['master', 'SIGTERM', 'SIGINT', 'restart']) {

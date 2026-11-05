@@ -17,6 +17,46 @@ function createWorker(id, received) {
     };
 }
 
+function isolateClusterListeners(t) {
+    const previous = new Map(['message', 'exit'].map(event => [event, cluster.listeners(event)]));
+    t.after(() => {
+        for (const [event, listeners] of previous) {
+            for (const listener of cluster.listeners(event)) {
+                if (!listeners.includes(listener)) cluster.removeListener(event, listener);
+            }
+        }
+    });
+}
+
+test('targeted shutdown reaches the remote mesh without shutting down the issuing primary', async t => {
+    isolateClusterListeners(t);
+    const forwarded = [], events = [];
+    const server = {
+        id: 'issuing-server', cluster_id: 'cluster-1', isPrimary: true,
+        workers: new Map(),
+        mesh: { send: payload => forwarded.push({ ...payload }) },
+        emit: (...args) => events.push(args)
+    };
+    const send = IPC.init(server, new Map());
+    await send({ method: 'shutdown', server: 'target-server', master: true, organization_id: 'tenant' });
+    assert.equal(forwarded.length, 1);
+    assert.equal(forwarded[0].server, 'target-server');
+    assert.deepEqual(events, []);
+});
+
+test('targeted shutdown executes on the target primary', async t => {
+    isolateClusterListeners(t);
+    const events = [];
+    const server = {
+        id: 'target-server', cluster_id: 'cluster-1', isPrimary: true,
+        workers: new Map(), emit: (...args) => events.push(args)
+    };
+    const send = IPC.init(server, new Map());
+    await send({ method: 'shutdown', server: 'target-server', master: true, organization_id: 'tenant', serverId: 'issuing-server' });
+    assert.equal(events.length, 1);
+    assert.equal(events[0][0], 'shutdown');
+});
+
 test('a primary serving as a worker stamps its origin before mesh delivery', async () => {
     const received = [];
     const server = {

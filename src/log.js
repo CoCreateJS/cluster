@@ -236,15 +236,8 @@ export async function save() {
         recentLogs = [...recentLogs, ...pendingLogs].slice(-logConfig.maxLogs);
 
         // Persist updated log ring buffer to the server object in DB
-        if (server.crud && typeof server.getServerObject === 'function') {
-            const payload = server.getServerObject({
-                logs: recentLogs
-            });
-
-            await server.crud.send(payload);
-        }
-    } catch (err) {
-        originalConsole.error('[@cocreate/cluster] [LOG FLUSH ERROR]', err.message);
+        const payload = server.state.getServerObject({ logs: recentLogs });
+        await server.crud.send(payload);
     } finally {
         isLoggingInternal = false;
     }
