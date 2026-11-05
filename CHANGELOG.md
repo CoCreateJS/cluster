@@ -1,3 +1,17 @@
+# [2.1.0](https://github.com/CoCreateJS/cluster/compare/v2.0.0...v2.1.0) (2026-11-05)
+
+
+### Bug Fixes
+
+* reuse managed provisioning and termination flows ([26c6594](https://github.com/CoCreateJS/cluster/commit/26c6594a4fef93e7fc1f789948b946dc69bcb773))
+* upgrade CoCreate dependencies to v2 ([52d1fc9](https://github.com/CoCreateJS/cluster/commit/52d1fc95263b87661547dabb0fc4d341983bad1c))
+
+
+### Features
+
+* manage cluster creation retirement and repository lifecycle ([d3c8d1e](https://github.com/CoCreateJS/cluster/commit/d3c8d1e9b3d780a40c278b486fb64c6867409555))
+* manage node repositories and routing in the cluster primary ([a31da93](https://github.com/CoCreateJS/cluster/commit/a31da930539647d4de9ad3621f0967fe5714a9b4))
+
 # [2.0.0](https://github.com/CoCreateJS/cluster/compare/v1.8.0...v2.0.0) (2026-11-02)
 
 
