@@ -850,7 +850,7 @@ storage reference, hostname and runtime settings, resolving the tenant bootstrap
 source using cluster.manager.for for script preparation. Cluster.name is an editable label;
 cluster.manager stores organization_id, host and for in both database copies. initialDeployment
 and repositories remain top-level cluster configuration. Signup prepares those documents
-and repository registration before ready; later Mesh activation invokes VM creation. It creates platform and tenant inventory before dispatching
+and repository registration, then awaits manager.createServer(cluster) before reporting success. Later Mesh activation retains its running-server creation decision. Manager creates platform and tenant inventory before dispatching
 the existing create-organization-server workflow, mirrors the provider patch, and retains
 the existing startup watchdog. Concurrent creation commands are allowed; ordinary
 AutoScaler policy handles excess running capacity. ensureServer is removed.
