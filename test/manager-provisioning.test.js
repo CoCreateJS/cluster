@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import config from '@cocreate/config';
+import { Readable } from 'node:stream';
+import Authorize from '../../authorize/src/index.js';
+import { init as initApi } from '../../api/src/server.js';
 import { init } from '../src/manager.js';
 
 const tenant = 'aaaaaaaaaaaaaaaaaaaaaaaa';
@@ -36,8 +39,14 @@ async function setup(t, options = {}) {
     }
     const server = {
         id: '000000000000000000000001', isPrimary: true, organization_id: platform, host: 'platform.test',
-        crud: { send: async request => {
+        authorize: { ...Authorize, check: async () => options.authorized !== false },
+        crud: { getOrganization: async () => ({ _id: platform }), send: async request => {
             requests.push(clone(request));
+            if (request.method === 'object.delete') {
+                const records = request.organization_id === tenant ? tenantRecords : inventory;
+                for (const record of request.object) records.delete(record._id);
+                return { object: [] };
+            }
             if (request.organization_id === tenant) {
                 if (options.failProjection || (options.failFinalProjection && request.object['infrastructure.instanceId'])) return { error: ['projection failed'] };
                 return { object: [clone(update(tenantRecords, request.object))] };
@@ -48,7 +57,11 @@ async function setup(t, options = {}) {
                 if (request.array === 'organizations') return { object: [{ _id: tenant, cluster_id: clusterId, bootstrapStorage: {
                     name: 'tenant-storage', provider: 'mongodb', connectionString: 'mongodb://tenant-only.test'
                 } }] };
-                if (request.array === 'clusters') return { object: [cluster] };
+                if (request.array === 'clusters') {
+                    assert.equal(query._id, clusterId);
+                    assert.equal(query.type, 'organization');
+                    return { object: options.foreignCluster ? [] : [cluster] };
+                }
                 if (request.array === 'keys') {
                     assert.equal(query.tenant_organization_id, tenant);
                     return { object: options.missingManagementKey ? [] : [{ key: 'test-only-management-key' }] };
@@ -81,7 +94,119 @@ async function setup(t, options = {}) {
             return { 'create-organization-server': [{ patch, server: clone(inventory.get(patch._id)) }] };
         } }
     };
+    const api = await initApi(server);
+    server.api = { ...api, send: async request => {
+        calls.push(clone(request));
+        assert.equal(request.organization_id, platform);
+        assert.equal(request.host, 'platform.test');
+        assert.equal(inventory.get(request.data.server_id).master.status, 'terminating');
+        assert.equal(tenantRecords.get(request.data.server_id).master.status, 'terminating');
+        if (options.failTermination) return { success: false, error: ['provider rejected termination'] };
+        return { data: { state: 'shutting-down' } };
+    } };
     return { handler: await init(server), server, cluster, inventory, tenantRecords, requests, calls };
+}
+
+async function managedRequest(handler, input) {
+    const req = Readable.from([JSON.stringify(input)]);
+    Object.assign(req, { method: 'POST', url: '/manager', headers: {
+        host: 'platform.test', authorization: 'Bearer cluster-key', 'content-type': 'application/json'
+    } });
+    const response = {};
+    await handler.http(req, { writeHead(status) { response.status = status; },
+        end(body) { response.body = JSON.parse(body); } });
+    return response;
+}
+
+const scalingRequest = endpoint => ({
+    api: 'platform-cloud', endpoint, method: 'post', region: 'example-region',
+    organization_id: tenant, host: 'tenant.test',
+    data: { cluster_id: clusterId, server_id: 'dddddddddddddddddddddddd',
+        cloud: 'cloud-api', vmType: 'too-small', region: 'example-region', vmId: 'instance-1', name: 'scale-out' }
+});
+
+test('managed scale-out reuses creation with selected placement and tenant bootstrap under parent scope', async t => {
+    const { handler, cluster, inventory, tenantRecords, requests, calls } = await setup(t);
+    const savedCluster = clone(cluster);
+    const input = scalingRequest('create-instance');
+    const response = await managedRequest(handler, input);
+    assert.equal(response.status, 200);
+    assert.equal(response.body.data.instanceId, 'instance-1');
+    const id = input.data.server_id;
+    for (const records of [inventory, tenantRecords]) {
+        assert.equal(records.size, 1);
+        assert.equal(records.get(id).cluster_id, clusterId);
+        assert.equal(records.get(id).infrastructure.vmType, 'too-small');
+        assert.equal(records.get(id).infrastructure.instanceId, 'instance-1');
+    }
+    assert.deepEqual(cluster, savedCluster, 'scaling leaves the stored initial deployment unchanged');
+    const workflow = calls[0];
+    assert.equal(workflow.organization_id, platform);
+    const script = JSON.parse(workflow['create-organization-server'][0].startupScript).$concat[0][0];
+    const bootstrap = JSON.parse(Buffer.from(script.match(/# config=(.*)/)[1], 'base64'));
+    assert.equal(bootstrap.organization_id, tenant);
+    assert.equal(bootstrap.server_id, id);
+    assert.equal(bootstrap.cluster_id, clusterId);
+    assert.equal(bootstrap.storage.connectionString, 'mongodb://tenant-only.test');
+    assert.deepEqual(requests[0].filter.query, {
+        _id: clusterId, type: 'organization', 'manager.organization_id': platform
+    });
+    assert.ok(requests.filter(request => request.method === 'object.read').every(request => request.organization_id === platform));
+});
+
+test('manager authorizes before reading cluster metadata or performing managed work', async t => {
+    const { handler, requests, calls } = await setup(t, { authorized: false });
+    assert.equal((await managedRequest(handler, scalingRequest('create-instance'))).status, 403);
+    assert.deepEqual(requests, []);
+    assert.deepEqual(calls, []);
+});
+
+test('a cluster unavailable in platform scope cannot dispatch managed scaling', async t => {
+    const { handler, inventory, tenantRecords, calls } = await setup(t, { foreignCluster: true });
+    assert.equal((await managedRequest(handler, scalingRequest('create-instance'))).status, 500);
+    assert.equal(inventory.size, 0);
+    assert.equal(tenantRecords.size, 0);
+    assert.deepEqual(calls, []);
+});
+
+test('managed creation cannot switch to an API different from the authorized request', async t => {
+    const { handler, inventory, calls } = await setup(t);
+    const input = scalingRequest('create-instance');
+    input.api = 'other-cloud';
+    assert.equal((await managedRequest(handler, input)).status, 500);
+    assert.equal(inventory.size, 0);
+    assert.deepEqual(calls, []);
+});
+
+test('managed provider creation failure retains failed records in both inventories', async t => {
+    const { handler, inventory, tenantRecords } = await setup(t, { failProvider: true });
+    const input = scalingRequest('create-instance');
+    assert.equal((await managedRequest(handler, input)).status, 500);
+    for (const records of [inventory, tenantRecords]) assert.equal(records.get(input.data.server_id).master.status, 'failed');
+});
+
+for (const failTermination of [false, true]) {
+    test(`terminateServer calls the provider in parent scope and mirrors ${failTermination ? 'failure' : 'termination'}`, async t => {
+        const { handler, inventory, tenantRecords, calls } = await setup(t, { failTermination });
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        const input = scalingRequest('delete-instance');
+        const response = await managedRequest(handler, input);
+        assert.equal(response.status, failTermination ? 500 : 200);
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].endpoint, 'delete-instance');
+        assert.equal(calls[0].data.cluster_id, clusterId);
+        assert.equal(calls[0].data.vmId, 'instance-1');
+        for (const records of [inventory, tenantRecords]) {
+            assert.equal(records.get(input.data.server_id).master.status, failTermination ? 'failed' : 'terminating');
+        }
+        assert.equal(typeof handler.terminateServer, 'function');
+        assert.equal(Object.keys(handler).includes('terminateServer'), false);
+        t.mock.timers.tick(60000);
+        await new Promise(resolve => setImmediate(resolve));
+        for (const records of [inventory, tenantRecords]) {
+            assert.equal(records.has(input.data.server_id), failTermination, 'only successful termination schedules inventory cleanup');
+        }
+    });
 }
 
 

@@ -7,7 +7,7 @@ const errors = result => !result || result.success === false ||
 const copyRecord = record => Object.fromEntries(Object.entries(structuredClone(record))
     .filter(([key]) => key !== 'organization_id' && !key.startsWith('$')));
 
-/** Parent connection and platform-owned initial server provisioning. */
+/** Parent connection and platform-owned server provisioning and termination. */
 export async function init(server) {
     let connection = {};
     if (!server.isPrimary && process.env.SERVER_MANAGER) {
@@ -59,7 +59,7 @@ export async function init(server) {
     } });
     const startupMonitor = createStartupMonitor(server);
     const cleanupMonitor = createCleanupMonitor(server);
-    Object.defineProperty(manager, 'http', { value: (req, res) => handleManagerHttp(server, startupMonitor, cleanupMonitor, req, res) });
+    Object.defineProperty(manager, 'http', { value: (req, res) => handleManagerHttp(server, startupMonitor, cleanupMonitor, dispatchApi, req, res) });
     const settings = { enabled: false, workflow: 'create-organization-server' };
     if (server.isPrimary) {
         Object.assign(settings, dotNotationToObject(await config.get('organizationConnection') || {}));
@@ -86,14 +86,58 @@ export async function init(server) {
         }, organizationId, host);
         if (!result.object?.length) throw new Error('Tenant server projection was not persisted.');
     }
-    async function createServer(cluster) {
+    async function saveServer(cluster, patch) {
+        const result = await crud({ method: 'object.update', array: 'servers', upsert: true, object: copyRecord(patch) });
+        await mirror(patch, cluster.manager.for, cluster.host);
+        return result;
+    }
+    async function dispatchApi(request) {
+        const data = request.data;
+        if (!data?.cluster_id || !data.server_id || !['create-instance', 'delete-instance'].includes(request.endpoint)) {
+            if (request.endpoint === 'create-instance' && typeof data?.server_id === 'string') {
+                return startupMonitor.track(data.server_id, () => server.api.send(request), result => result?.data?.instanceId);
+            }
+            return server.api.send(request);
+        }
+        const [cluster] = await read('clusters', {
+            _id: data.cluster_id, type: 'organization', 'manager.organization_id': request.organization_id
+        });
+        if (!cluster) throw new Error('The managed cluster is unavailable in the platform scope.');
+        const deployment = { ...data, api: request.api, method: request.method,
+            endpoint: request.endpoint, region: request.region || data.region };
+        if (request.endpoint === 'create-instance') {
+            const result = await createServer(cluster, deployment);
+            return { data: result.data };
+        }
+        return terminateServer(cluster, deployment);
+    }
+    async function terminateServer(cluster, deployment) {
+        const patch = { _id: deployment.server_id, cluster_id: cluster._id,
+            tenant_organization_id: cluster.manager.for, 'master.status': 'terminating' };
+        await saveServer(cluster, patch);
+        try {
+            const result = await server.api.send({
+                api: deployment.api, endpoint: deployment.endpoint || 'delete-instance', method: deployment.method,
+                organization_id: server.organization_id, host: server.host, region: deployment.region,
+                data: { server_id: deployment.server_id, cluster_id: cluster._id, vmId: deployment.vmId,
+                    provider: deployment.provider, region: deployment.region }
+            });
+            if (errors(result)) throw new Error('The cloud API rejected the termination request.');
+            cleanupMonitor.schedule(patch, { organization_id: server.organization_id, host: server.host });
+            return result;
+        } catch (error) {
+            cleanupMonitor.cancel(deployment.server_id);
+            await saveServer(cluster, { ...patch, 'master.status': 'failed' });
+            throw error;
+        }
+    }
+    async function createServer(cluster, deployment = cluster.initialDeployment) {
         const organizationId = cluster.manager.for;
         const organization = (await read('organizations', { _id: organizationId }, { _id: 1, bootstrapStorage: 1 }))[0];
         const workflows = await read('workflows', { name: settings.workflow, enabled: true });
         if (workflows.length !== 1) throw new Error('The organization server workflow is unavailable or ambiguous.');
-        const deployment = cluster.initialDeployment;
         if (![deployment?.cloud, deployment?.region, deployment?.vmType].every(value => typeof value === 'string' && value.trim())) {
-            throw new Error('Organization cluster requires initialDeployment cloud, region and VM type.');
+            throw new Error('Server deployment requires cloud, region and VM type.');
         }
         if (typeof cluster.storage !== 'string' || !cluster.storage.trim()) {
             throw new Error('Organization cluster requires a storage API reference.');
@@ -105,12 +149,13 @@ export async function init(server) {
             server: cluster.host, cluster: cluster._id
         }, server.crud) || {});
         const cloud = (await read('apis', { _id: deployment.cloud, type: 'cloud', enabled: true }, { _id: 1, name: 1, provider: 1 }))[0];
-        if (!cloud?.name || !cloud.provider) throw new Error('The initial deployment cloud API is unavailable.');
+        if (!cloud?.name || !cloud.provider) throw new Error('The deployment cloud API is unavailable.');
+        if (deployment.api && deployment.api !== cloud.name) throw new Error('The deployment cloud does not match the authorized API.');
         const profile = resolved.clouds?.[cloud.provider];
         const region = profile?.regions?.find(item => item.region === deployment.region);
         const instance = profile?.instances?.find(item => item.name === deployment.vmType);
         if (!region || ![instance?.vCPU, instance?.memoryGb].every(value => Number.isFinite(Number(value)) && Number(value) > 0)) {
-            throw new Error('The initial deployment region or VM type is unavailable.');
+            throw new Error('The deployment region or VM type is unavailable.');
         }
         const binaryUrl = cluster.binaryUrl || resolved.binaryUrl;
         if (typeof binaryUrl !== 'string' || !/^https:\/\/[^\s\\"'`$]+$/.test(binaryUrl) ||
@@ -125,9 +170,9 @@ export async function init(server) {
         if (managementKeys.length !== 1 || typeof managementKeys[0].key !== 'string' || !managementKeys[0].key) {
             throw new Error('The managed cluster requires exactly one management API key.');
         }
-        const serverId = ObjectId().toString();
+        const serverId = deployment.server_id || ObjectId().toString();
         const record = {
-            _id: serverId, name: `org-${organizationId}-initial-${serverId.slice(-6)}`,
+            _id: serverId, name: deployment.name || `org-${organizationId}-initial-${serverId.slice(-6)}`,
             cluster_id: cluster._id, tenant_organization_id: organizationId,
             manager: { organization_id: cluster.manager.organization_id, host: cluster.manager.host, apiKey: managementKeys[0].key },
             cloud: cloud._id, storage: cluster.storage, host: cluster.host,
@@ -149,36 +194,45 @@ export async function init(server) {
         if (typeof startupScript !== 'string' || !startupScript.trim()) throw new Error('Tenant startup script preparation failed.');
         const created = await crud({ method: 'object.create', array: 'servers', object: copyRecord(record) });
         if (!created.object?.length) throw new Error('Platform server inventory was not persisted.');
-        // Populate tenant inventory before boot so its runtime can resolve the cluster ID immediately.
-        await mirror(record, organizationId, cluster.host);
-        const name = settings.workflow;
-        const result = await startupMonitor.track(record._id, () => server.workflow.run({
-            method: `workflow.${name}`, organization_id: server.organization_id, host: server.host,
-            [name]: [{ server: { _id: record._id, cluster_id: record.cluster_id },
-                startupScript: JSON.stringify({ $concat: [[startupScript]] }), binaryUrl, environment }]
-        }), result => {
-            const patch = result?.[name]?.[0]?.patch;
-            return patch?._id === record._id ? patch['infrastructure.instanceId'] : undefined;
-        });
-        if (errors(result)) {
-            console.error('[@cocreate/cluster] Initial VM creation failed; platform notification pending:', {
-                organization_id: organizationId, cluster_id: cluster._id, server_id: record._id
+        try {
+            // Populate tenant inventory before boot so its runtime can resolve the cluster ID immediately.
+            await mirror(record, organizationId, cluster.host);
+            const name = settings.workflow;
+            const result = await startupMonitor.track(record._id, () => server.workflow.run({
+                method: `workflow.${name}`, organization_id: server.organization_id, host: server.host,
+                [name]: [{ server: { _id: record._id, cluster_id: record.cluster_id },
+                    startupScript: JSON.stringify({ $concat: [[startupScript]] }), binaryUrl, environment }]
+            }), result => {
+                const patch = result?.[name]?.[0]?.patch;
+                return patch?._id === record._id ? patch['infrastructure.instanceId'] : undefined;
             });
-            throw new Error('Organization VM creation did not complete; inspect its server inventory.');
+            if (errors(result)) {
+                console.error('[@cocreate/cluster] Initial VM creation failed; platform notification pending:', {
+                    organization_id: organizationId, cluster_id: cluster._id, server_id: record._id
+                });
+                throw new Error('Organization VM creation did not complete; inspect its server inventory.');
+            }
+            const output = result?.[name]?.[0];
+            if (!output?.patch || output.patch._id !== record._id || !output.patch['infrastructure.instanceId']) {
+                console.error('[@cocreate/cluster] Initial VM response has no matching instance ID; platform notification pending:', {
+                    organization_id: organizationId, cluster_id: cluster._id, server_id: record._id
+                });
+                throw new Error('Organization VM result did not include a provider instance ID.');
+            }
+            // Apply the same provider patch in tenant scope without overwriting node-owned readiness fields.
+            await mirror(output.patch, organizationId, cluster.host);
+            return { status: 'created', server: output.server, data: output.data || {
+                instanceId: output.patch['infrastructure.instanceId'],
+                privateIpAddress: output.patch['infrastructure.privateIpAddress']
+            } };
+        } catch (error) {
+            await saveServer(cluster, { _id: record._id, cluster_id: cluster._id, 'master.status': 'failed' });
+            throw error;
         }
-        const output = result?.[name]?.[0];
-        if (!output?.patch || output.patch._id !== record._id || !output.patch['infrastructure.instanceId']) {
-            console.error('[@cocreate/cluster] Initial VM response has no matching instance ID; platform notification pending:', {
-                organization_id: organizationId, cluster_id: cluster._id, server_id: record._id
-            });
-            throw new Error('Organization VM result did not include a provider instance ID.');
-        }
-        // Apply the same provider patch in tenant scope without overwriting node-owned readiness fields.
-        await mirror(output.patch, organizationId, cluster.host);
-        return { status: 'created', server: output.server };
     }
     // Methods stay out of persisted manager connection data and worker configuration.
     Object.defineProperty(manager, 'createServer', { value: createServer });
+    Object.defineProperty(manager, 'terminateServer', { value: terminateServer });
     return manager;
 }
 
@@ -283,7 +337,7 @@ function createCleanupMonitor(server) {
     };
 }
 
-async function handleManagerHttp(server, startupMonitor, cleanupMonitor, req, res) {
+async function handleManagerHttp(server, startupMonitor, cleanupMonitor, dispatchApi, req, res) {
     const reply = (status, body) => {
         res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
         res.end(JSON.stringify(body));
@@ -311,12 +365,7 @@ async function handleManagerHttp(server, startupMonitor, cleanupMonitor, req, re
         return reply(400, { error: 'A JSON object is required.' });
     }
 
-    if (input.api) {
-        if (input.endpoint !== 'create-instance' || typeof input.data?.server_id !== 'string' || !input.data.server_id) {
-            return server.api.http(req, res, input);
-        }
-        return startupMonitor.track(input.data.server_id, () => server.api.http(req, res, input), result => result?.data?.instanceId);
-    }
+    if (input.api) return server.api.http(req, res, input, dispatchApi);
     const bearer = req.headers.authorization?.match(/^Bearer\s+(\S+)$/i)?.[1];
     const apikey = bearer || input.apikey;
     if ((apikey !== undefined && (typeof apikey !== 'string' || !apikey.trim())) ||

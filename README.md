@@ -832,7 +832,8 @@ organization git metadata is performed.
 
 ## Platform organization activation
 
-Manager exposes non-enumerable send(envelope), createServer(cluster), http and config
+Manager exposes non-enumerable send(envelope), createServer(cluster, deployment),
+terminateServer(cluster, deployment), http and config
 properties; only parent connection fields are serialized. Initialization loads the
 platform organizationConnection settings after CRUD/API/workflows. Its enabled flag
 controls Mesh's optional creation hook; tenant signup does not copy that platform config.
@@ -853,6 +854,20 @@ and repository registration before ready; later Mesh activation invokes VM creat
 the existing create-organization-server workflow, mirrors the provider patch, and retains
 the existing startup watchdog. Concurrent creation commands are allowed; ordinary
 AutoScaler policy handles excess running capacity. ensureServer is removed.
+
+Managed scale-out passes its chosen deployment and server_id to the same createServer
+path after API.http authorization. Omitting deployment uses cluster.initialDeployment;
+passing it leaves that static anchor unchanged. Parent inventory, configuration and
+provider operations use platform identity. Startup data uses cluster.manager.for,
+and both inventories receive the same server/cluster IDs and provider patch before
+success is returned. The requested cloud must match the authorized API.
+
+Managed scale-in includes cluster_id and dispatches terminateServer. It mirrors
+terminating before the parent-scoped provider request and failed on rejection;
+success retains terminating and schedules the existing cleanup. AutoScaler still
+owns draining, transport retry and final shutdown. deleteServer only removes inventory.
+Scale-in accepts the persisted infrastructure.instanceId as its provider VM identifier.
+
 
 ## Mesh peer connection and close contract
 
