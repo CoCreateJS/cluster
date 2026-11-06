@@ -32,30 +32,17 @@ export function init(server) {
             method,
             ...data,
             master: true,
-            broadcast: false,
-            broadcastSender: true
+            broadcast: false
         });
+        if (response.error || response.success === false) throw new Error(response.error);
         return response.result;
     }
 
     async function respond(payload, operation) {
-        if (payload.broadcastSender === false) return;
-
         try {
-            const result = await operation();
-            await server.send({
-                ...payload,
-                response: true,
-                success: true,
-                result
-            });
+            return { ...payload, success: true, result: await operation() };
         } catch (error) {
-            await server.send({
-                ...payload,
-                response: true,
-                success: false,
-                error: error.message
-            });
+            return { ...payload, success: false, error: error.message || String(error) };
         }
     }
 

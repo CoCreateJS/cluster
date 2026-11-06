@@ -28,7 +28,7 @@ import Config from '@cocreate/config';
 import authenticate from '@cocreate/authenticate';
 import authorize from '@cocreate/authorize';
 
-import { SocketServer as SocketServer } from '@cocreate/socket';
+import { SocketServer } from '@cocreate/socket';
 import CrudServer from '@cocreate/crud-server';
 import FileServer from '@cocreate/file/server';
 import ApiServer from '@cocreate/api';
@@ -68,7 +68,7 @@ export class CoCreateServer {
 
         // The local worker collection also owns its process lifecycle.
         this.workers = new Workers(this);
-        this.cluster = this.workers; // Compatibility with the existing local cluster interface.
+        this.cluster = ServerMesh;
 
         // Directly bind cluster instance properties to parent server instance
         this.isPrimary = this.workers.isPrimary;
@@ -86,6 +86,12 @@ export class CoCreateServer {
     once(event, listener) { this.#emitter.once(event, listener); return this; }
     off(event, listener) { this.#emitter.off(event, listener); return this; }
     emit(event, ...args) { return this.#emitter.emit(event, ...args); }
+    async emitAsync(event, payload) {
+        const replies = await Promise.all(this.#emitter.rawListeners(event)
+            .map(listener => listener.call(this.#emitter, payload)));
+        return replies.find(reply => reply?.uuid === payload.uuid) || payload;
+    }
+
 
     #closeEdgeListeners() {
         if (this.isPrimary) return;
@@ -156,17 +162,17 @@ export class CoCreateServer {
             console.error('[@cocreate/cluster] Unable to initialize the node organization API key.');
         }
         this.authenticate = authenticate.init(this);
-        this.mesh = ServerMesh;
         this.api = await ApiServer.init(this);
         this.workflow = await Workflow.init(this);
         this.manager = await Manager.init(this);
+        if (!this.isPrimary) await this.cluster.init(this);
 
         if (this.isPrimary) {
             console.log(`[@cocreate/cluster] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);
             this.location = await getClientInfo();
             this.ip = this.location.ip;
             this.infrastructure = await getInfrastructure(this.id);
-            await this.mesh.init(this);
+            await this.cluster.init(this);
             this.autoscaler = await ServerAutoscaler.init(this);
 
             // Reset logs array for a fresh logging session on master startup
@@ -201,15 +207,6 @@ export class CoCreateServer {
             if (workerResponse?.error?.length || (workerResponse?.error && !Array.isArray(workerResponse.error)))
                 console.warn('[@cocreate/cluster] Could not update the worker profile:', workerResponse.error);
             await this.state.save('running');
-
-            // Route mesh commands to IPC
-            const systemEvents = ['restart', 'reboot', 'shutdown', 'cordon', 'shed', 'drain'];
-            for (const eventName of systemEvents) {
-                this.mesh.on(eventName, (payload) => {
-                    console.log(`[@cocreate/cluster] [MASTER] Received remote mesh command: "${eventName}"`);
-                    this.send(payload);
-                });
-            }
 
             this.routing = await Routing.init(this);
             this.repository = await Repository.init(this);

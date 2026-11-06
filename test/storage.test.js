@@ -10,6 +10,10 @@ function createServer({ isPrimary, send }) {
         isPrimary,
         on: emitter.on.bind(emitter),
         emit: emitter.emit.bind(emitter),
+        async emitAsync(method, payload) {
+            const replies = await Promise.all(emitter.rawListeners(method).map(listener => listener.call(emitter, payload)));
+            return replies.find(reply => reply?.uuid === payload.uuid) || payload;
+        },
         send
     };
 }
@@ -57,40 +61,21 @@ test('workers proxy every storage operation through server.send', async () => {
     for (const request of requests) {
         assert.equal(request.master, true);
         assert.equal(request.broadcast, false);
-        assert.equal(request.broadcastSender, true);
+        assert.equal(request.broadcastSender, undefined);
     }
 });
 
-test('primary storage events return results through server.send', async () => {
-    const responses = [];
-    const server = createServer({
-        isPrimary: true,
-        send: async payload => responses.push(payload)
-    });
+test('primary storage handlers return envelopes regardless of broadcastSender', async () => {
+    const server = createServer({ isPrimary: true, send() { assert.fail('IPC owns response transmission'); } });
     Storage.init(server);
-
-    server.emit('storage.set', {
-        method: 'storage.set',
-        uuid: 'set-uuid',
-        sourceWorker: 2,
-        broadcastSender: true,
-        key: 'shared',
-        value: 42
+    const write = await server.emitAsync('storage.set', {
+        method: 'storage.set', uuid: 'set-uuid', broadcastSender: false, key: 'shared', value: 42
     });
-    await new Promise(resolve => setImmediate(resolve));
-
-    server.emit('storage.get', {
-        method: 'storage.get',
-        uuid: 'get-uuid',
-        sourceWorker: 2,
-        broadcastSender: true,
-        key: 'shared'
+    const read = await server.emitAsync('storage.get', {
+        method: 'storage.get', uuid: 'get-uuid', key: 'shared'
     });
-    await new Promise(resolve => setImmediate(resolve));
-
-    assert.equal(responses.length, 2);
-    assert.equal(responses[0].success, true);
-    assert.equal(responses[0].result, true);
-    assert.equal(responses[1].success, true);
-    assert.equal(responses[1].result, 42);
+    assert.equal(write.success, true);
+    assert.equal(write.result, true);
+    assert.equal(read.success, true);
+    assert.equal(read.result, 42);
 });

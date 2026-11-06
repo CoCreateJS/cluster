@@ -19,422 +19,175 @@
 import cluster from 'node:cluster';
 import { uuid } from '@cocreate/utils';
 
-function resolvePending(pendingPromises, message) {
-    const messageId = message.uuid || message.messageId;
-    if (!messageId || !pendingPromises.has(messageId)) return false;
+const presenceEvents = ['orgConnected', 'orgDisconnected'];
+const masterControls = ['restart', 'reboot', 'shutdown'];
+const workerControls = ['cordon', 'shed', 'drain'];
+const includesTarget = (target, id) => target === undefined ||
+    (Array.isArray(target) ? target : [target]).some(value => String(value) === String(id));
+const organizationDelivery = payload => Boolean(payload.organization_id &&
+    !presenceEvents.includes(payload.method) && !masterControls.includes(payload.method) &&
+    !workerControls.includes(payload.method));
 
-    const promiseHandler = pendingPromises.get(messageId);
-    pendingPromises.delete(messageId);
+/** IPC owns request/reply correlation; callers always receive the envelope. */
+export function init(server, pendingPromises) {
+    const organizationWorkers = server.organizationWorkers ||= new Map();
 
-    if (message.error || message.success === false) {
-        promiseHandler.reject(new Error(message.error || 'IPC request failed'));
-    } else {
-        promiseHandler.resolve(
-            message.uuid || message.result === undefined
-                ? message
-                : message.result
-        );
+    function transportEnvelope({ socket, wsManager, ...payload }) { return payload; }
+
+    function request(send, payload, key, workerId) {
+        return new Promise((resolve, reject) => {
+            pendingPromises.set(key, { resolve, reject, workerId });
+            try { send(transportEnvelope(payload)); }
+            catch (error) { pendingPromises.delete(key); reject(error); }
+        });
     }
 
-    return true;
-}
+    function resolveResponse(payload, key) {
+        const pending = pendingPromises.get(key);
+        pendingPromises.delete(key);
+        // Late and duplicate replies are terminal, never executable events.
+        pending?.resolve(payload);
+    }
 
-function normalizeBroadcast(payload) {
-    if (payload.broadcast === 'false') payload.broadcast = false;
-}
+    function updateOrganizationWorker(payload) {
+        const { organization_id, workerId, method } = payload;
+        const workers = organizationWorkers.get(organization_id) || new Set();
+        const wasActive = workers.size > 0;
+        if (method === 'orgDisconnected') workers.delete(workerId);
+        else workers.add(workerId);
+        if (workers.size) organizationWorkers.set(organization_id, workers);
+        else organizationWorkers.delete(organization_id);
+        if (wasActive !== Boolean(workers.size)) {
+            server.emit(workers.size ? 'orgConnected' : 'orgDisconnected', { organization_id });
+        }
+    }
 
-function isOrganizationDelivery(payload) {
-    return Boolean(
-        payload.organization_id &&
-        payload.response !== true
-    );
-}
-
-function includesTarget(target, value) {
-    if (target === undefined) return true;
-    const targets = Array.isArray(target) ? target : [target];
-    return targets.some(item => String(item) === String(value));
-}
-
-/**
- * Initializes Inter-Process Communication (IPC) transport routing between 
- * the Master orchestrator and clustered Worker processes.
- * 
- * @param {Object} Server - The CoCreateServer instance reference
- * @param {Map} pendingPromises - Tracking map for async worker RPC promises
- * @returns {Function} Context-aware send function for dispatching cluster messages
- */
-export function init(Server, pendingPromises) {
-    const organizationWorkers = Server.organizationWorkers || new Map();
-    Server.organizationWorkers = organizationWorkers;
-
-    function updateOrganizationWorker(payload, remove = false) {
-        const organizationId = payload.organization_id;
-        const workerId = payload.workerId;
-        if (!organizationId || workerId == null) return;
-
-        let workers = organizationWorkers.get(organizationId);
-        const wasActive = Boolean(workers && workers.size);
-
-        if (remove) {
-            if (!workers) return;
-            workers.delete(workerId);
-            if (!workers.size) organizationWorkers.delete(organizationId);
-        } else {
-            if (!workers) {
-                workers = new Set();
-                organizationWorkers.set(organizationId, workers);
+    function deliverLocal(payload, execute) {
+        if (!includesTarget(payload.server, server.id) ||
+            !includesTarget(payload.cluster, server.cluster_id)) return payload;
+        if (organizationDelivery(payload)) {
+            if (server.socket && includesTarget(payload.worker, server.workerId)) {
+                return Promise.resolve(server.socket.send({ ...payload })).then(() => payload);
             }
-            workers.add(workerId);
+        } else if (execute && payload.method &&
+            (!server.isPrimary || payload.master !== false)) {
+            return server.emitAsync(payload.method, payload);
+        }
+        return payload;
+    }
+
+    async function route(payload, fromWorker = false) {
+        if (presenceEvents.includes(payload.method)) {
+            updateOrganizationWorker(payload);
+            return payload;
+        }
+        // Queue local work: synchronous eviction must not remove remote routes first.
+        const local = Promise.resolve().then(() =>
+            fromWorker && payload.serverId === server.id && payload.workerId === server.workerId
+                ? payload : deliverLocal(payload, true));
+        const targetsThisNode = includesTarget(payload.server, server.id) &&
+            includesTarget(payload.cluster, server.cluster_id);
+        const targetsOtherNodes = payload.server === undefined ||
+            (Array.isArray(payload.server) ? payload.server : [payload.server])
+                .some(id => String(id) !== String(server.id));
+        if (payload.serverId === server.id && targetsOtherNodes &&
+            (payload.organization_id || payload.server !== undefined || payload.cluster !== undefined)) {
+            server.cluster.send(transportEnvelope(payload));
         }
 
-        const isActive = organizationWorkers.has(organizationId);
-        if (wasActive === isActive) return;
+        const workers = targetsThisNode && !(payload.master === true && masterControls.includes(payload.method))
+            ? [...server.workers.values()].filter(worker => {
+                if (!includesTarget(payload.worker, worker.id)) return false;
+                if (organizationDelivery(payload)) {
+                    return organizationWorkers.get(payload.organization_id)?.has(worker.id) &&
+                        !(payload.serverId === server.id && payload.workerId === worker.id);
+                }
+                return payload.worker !== undefined || payload.broadcast;
+            }) : [];
 
-        Server.emit(isActive ? 'orgConnected' : 'orgDisconnected', { organization_id: organizationId });
+        if (['cordon', 'drain'].includes(payload.method) && payload.value !== false) {
+            const targeted = new Set(workers.map(worker => worker.id));
+            const active = [...server.workers.values()].some(worker => !targeted.has(worker.id) &&
+                worker.isListening && !worker.isCordoned && !worker.isDraining);
+            if (!active) server.state.evaluateMasterFallback();
+        }
+
+        const replies = await Promise.all([local, ...workers.map(worker => {
+            const process = worker.process || worker;
+            const nativeId = process.id ?? worker.id;
+            return request(message => process.send(message), payload, `${payload.uuid}:${nativeId}`, nativeId);
+        })]);
+        return replies.find(reply => reply.error || reply.success === false) || replies[1] || replies[0];
     }
 
-    // Socket Server emits process-local transitions. IPC owns transport and
-    // aggregates locally when the primary also serves clients. Aggregate events
-    // use Server.emit, so they cannot feed back into these process listeners.
-    for (const method of ['orgConnected', 'orgDisconnected']) {
+    async function receive(payload, reply, worker) {
+        if (payload.response === true) {
+            resolveResponse(payload, server.isPrimary ? `${payload.uuid}:${worker.id}` : payload.uuid);
+            return;
+        }
+        payload.uuid ||= uuid();
+        payload.workerId ??= worker?.id;
+        payload.serverId ??= server.id;
+        if (payload.broadcast === 'false') payload.broadcast = false;
+        let result;
+        try {
+            result = server.isPrimary ? await route(payload, true) : await deliverLocal(payload, true);
+        } catch (error) {
+            result = { ...payload, success: false, error: error.message };
+        }
+        reply({ ...transportEnvelope(result), response: true });
+    }
+
+    for (const method of presenceEvents) {
         process.on(method, (organization_id, details = {}) => {
-            const payload = { method, organization_id, workerId: details.workerId ?? Server.workerId };
-            if (Server.isPrimary) updateOrganizationWorker(payload, method === 'orgDisconnected');
-            else Server.send(payload);
+            const payload = { method, organization_id, workerId: details.workerId ?? server.workerId };
+            if (server.isPrimary) updateOrganizationWorker(payload);
+            else server.send(payload);
         });
     }
-
-    if (Server.isPrimary) {
-        cluster.on('exit', (worker) => {
-            for (const organizationId of organizationWorkers.keys()) {
-                updateOrganizationWorker({ organization_id: organizationId, workerId: worker.id }, true);
+    if (server.isPrimary) {
+        cluster.on('message', (worker, payload) =>
+            receive(payload, reply => (worker.process || worker).send(reply), worker));
+        cluster.on('exit', worker => {
+            const id = [...server.workers.values()].find(record => record.process === worker)?.id ?? worker.id;
+            for (const organization_id of organizationWorkers.keys()) {
+                updateOrganizationWorker({ method: 'orgDisconnected', organization_id, workerId: id });
+            }
+            for (const [key, pending] of pendingPromises) {
+                if (pending.workerId === worker.id) {
+                    pendingPromises.delete(key);
+                    pending.reject(new Error(`Worker ${worker.id} exited before replying`));
+                }
             }
         });
-
-        cluster.on('message', async (worker, message) => {
-            if (!message || typeof message !== 'object') return;
-            normalizeBroadcast(message);
-
-            // Only the process that originated this UUID can own its Promise.
-            if (resolvePending(pendingPromises, message)) return;
-
-            if (message.workerId === undefined) {
-                message.workerId = worker?.id;
-            }
-            if (message.serverId === undefined) {
-                message.serverId = Server.id;
-            }
-            message.status = 'sent';
-
-            if (message.method === 'orgConnected') {
-                updateOrganizationWorker(message);
-                return;
-            }
-            if (message.method === 'orgDisconnected') {
-                updateOrganizationWorker(message, true);
-                return;
-            }
-
-            // Responses are routed to their origin and are not executed again.
-            if (
-                message.method &&
-                !message.organization_id &&
-                message.master !== false &&
-                message.response !== true
-            ) {
-                Server.emit(message.method, message);
-            }
-
-            // Relay without creating another Promise.
-            if (
-                message.broadcast ||
-                message.worker ||
-                message.server !== undefined ||
-                message.cluster !== undefined ||
-                message.organization_id ||
-                message.response === true
-            ) {
-                route(message);
-            }
-        });
-
-        function route(payload = {}) {
-            if (!payload || typeof payload !== 'object') return;
-            normalizeBroadcast(payload);
-
-            const organizationDelivery = isOrganizationDelivery(payload);
-            const targetsCurrentServer =
-                includesTarget(payload.server, Server.id) &&
-                includesTarget(payload.cluster, Server.cluster_id);
-            const targetsRemoteServer =
-                payload.server === undefined ||
-                (Array.isArray(payload.server)
-                    ? payload.server
-                    : [payload.server]
-                ).some(serverId => String(serverId) !== String(Server.id));
-
-            if (
-                payload.serverId === Server.id &&
-                targetsRemoteServer &&
-                (organizationDelivery ||
-                    payload.server !== undefined ||
-                    payload.cluster !== undefined) &&
-                Server.mesh &&
-                typeof Server.mesh.send === 'function'
-            ) {
-                Server.mesh.send(payload);
-            }
-
-            const isMasterControl =
-                payload.method === 'restart' ||
-                payload.method === 'reboot' ||
-                payload.method === 'shutdown';
-            if (
-                isMasterControl &&
-                payload.master === true &&
-                Server.isPrimary &&
-                targetsCurrentServer
-            ) {
-                Server.emit(payload.method, payload);
-                return;
-            }
-
-            const isWorkerControl =
-                payload.method === 'cordon' ||
-                payload.method === 'shed' ||
-                payload.method === 'drain';
-            if (
-                isWorkerControl &&
-                Server.isWorker &&
-                targetsCurrentServer &&
-                includesTarget(payload.worker, Server.workerId)
-            ) {
-                Server.emit(payload.method, payload);
-            }
-
-            const targetWorkers = [];
-
-            if (targetsCurrentServer && payload.worker) {
-                const organizationWorkerIds = payload.organization_id
-                    ? organizationWorkers.get(payload.organization_id) || new Set()
-                    : null;
-                if (Array.isArray(payload.worker)) {
-                    for (const wId of payload.worker) {
-                        if (
-                            organizationWorkerIds &&
-                            !includesTarget([...organizationWorkerIds], wId)
-                        ) continue;
-                        const w = Server.workers.get(wId);
-                        if (w) targetWorkers.push(w);
-                    }
-                } else {
-                    if (
-                        organizationWorkerIds &&
-                        !includesTarget(
-                            [...organizationWorkerIds],
-                            payload.worker
-                        )
-                    ) return;
-                    const w = Server.workers.get(payload.worker);
-                    if (w) targetWorkers.push(w);
-                }
-            } else if (targetsCurrentServer && organizationDelivery) {
-                const workerIds = organizationWorkers.get(
-                    payload.organization_id
-                ) || [];
-                for (const workerId of workerIds) {
-                    const worker = Server.workers.get(workerId);
-                    if (worker) targetWorkers.push(worker);
-                }
-            } else if (targetsCurrentServer && payload.broadcast) {
-                for (const w of Server.workers.values()) {
-                    targetWorkers.push(w);
-                }
-            }
-
-            const filteredWorkers = targetWorkers.filter((workerObj) => {
-                if (
-                    organizationDelivery &&
-                    payload.serverId === Server.id &&
-                    payload.workerId === workerObj.id
-                ) return false;
-
-                return payload.broadcastSender !== false ||
-                    workerObj.id !== payload.workerId;
-            });
-
-            // Check edge listener fallback conditions for cordon/drain commands
-            if (payload.method === 'cordon' || payload.method === 'drain') {
-                const isEnabling = typeof payload.value === 'boolean' ? payload.value : (payload.value !== false);
-                if (isEnabling) {
-                    const targetedIds = new Set(targetWorkers.map(w => w.id));
-                    let activeRemaining = 0;
-                    
-                    for (const w of Server.workers.values()) {
-                        if (!targetedIds.has(w.id) && w.isListening && !w.isCordoned && !w.isDraining) {
-                            activeRemaining++;
-                        }
-                    }
-                    
-                    if (activeRemaining === 0) {
-                        Server.state.evaluateMasterFallback();
-                    }
-                }
-            }
-
-            for (const workerObj of filteredWorkers) {
-                const workerProcess = workerObj.process || workerObj;
-                if (workerProcess && typeof workerProcess.send === 'function' && workerProcess.isConnected()) {
-                    try {
-                        workerProcess.send(payload);
-                    } catch (err) {
-                        console.error(`[@cocreate/cluster] [MASTER] Failed to send IPC payload to worker ${workerObj.id}:`, err.message);
-                    }
-                }
-            }
-
-            if (
-                organizationDelivery &&
-                Server.isWorker &&
-                Server.wsManager &&
-                !(payload.serverId === Server.id &&
-                    payload.workerId === Server.workerId)
-            ) {
-                const data = { ...payload, serverSent: true };
-                Server.wsManager.send(data);
-            }
-
-        }
-
-        return function send(payload = {}) {
-            if (!payload || typeof payload !== 'object') return Promise.resolve(payload);
-            normalizeBroadcast(payload);
-
-            if (!payload.uuid) payload.uuid = uuid();
-            if (
-                Server.isWorker &&
-                payload.serverId === undefined &&
-                payload.workerId === undefined
-            ) {
-                payload.workerId = Server.workerId;
-            }
-            if (payload.serverId === undefined) {
-                payload.serverId = Server.id;
-                payload.status = 'sent';
-            }
-
-            if (payload.method === 'orgConnected') {
-                updateOrganizationWorker(payload);
-                return Promise.resolve(payload);
-            }
-            if (payload.method === 'orgDisconnected') {
-                updateOrganizationWorker(payload, true);
-                return Promise.resolve(payload);
-            }
-
-            const isResponse = payload.response === true;
-            if (isResponse) {
-                payload.worker = payload.workerId;
-                payload.master = payload.workerId == null;
-            }
-
-            const response = new Promise((resolve, reject) => {
-                if (
-                    !isResponse &&
-                    !payload.broadcast &&
-                    payload.broadcastSender === true
-                ) {
-                    pendingPromises.set(payload.uuid, { resolve, reject });
-                } else {
-                    resolve(payload);
-                }
-            });
-
-            route(payload);
-
-            if (
-                payload.method &&
-                !payload.organization_id &&
-                payload.master !== false &&
-                !isResponse &&
-                payload.broadcastSender !== false
-            ) {
-                Server.emit(payload.method, payload);
-            }
-
-            return response;
-        };
     } else {
-        process.on('message', async (message) => {
-            if (!message || typeof message !== 'object') return;
-
-            if (resolvePending(pendingPromises, message)) return;
-
-            if (
-                message.method === 'cordon' ||
-                message.method === 'shed' ||
-                message.method === 'drain'
-            ) {
-                Server.emit(message.method, message);
-                return;
-            }
-
-            if (isOrganizationDelivery(message) && Server.wsManager) {
-                const data = { ...message, serverSent: true };
-                Server.wsManager.send(data);
-                return;
-            }
-
-            if (message.method) {
-                Server.emit(message.method, message);
-            }
-        });
-
-        return function send(payload = {}) {
-            if (!payload || typeof payload !== 'object') return Promise.resolve(payload);
-            normalizeBroadcast(payload);
-
-            if (!payload.uuid) payload.uuid = uuid();
-            if (
-                payload.serverId === undefined &&
-                payload.workerId === undefined
-            ) {
-                payload.workerId = Server.workerId;
-            }
-
-            const isResponse = payload.response === true;
-            if (isResponse) {
-                payload.worker = payload.workerId;
-                payload.master = payload.workerId == null;
-            }
-            const response = new Promise((resolve, reject) => {
-                if (
-                    !isResponse &&
-                    !payload.broadcast &&
-                    payload.broadcastSender === true
-                ) {
-                    pendingPromises.set(payload.uuid, { resolve, reject });
-                } else {
-                    resolve(payload);
-                }
-            });
-
-            if (typeof process.send === 'function' && process.connected) {
-                try {
-                    process.send(payload);
-                } catch (err) {
-                    console.error(`[@cocreate/cluster] [WORKER ${process.pid}] Failed to dispatch IPC message to master:`, err.message);
-                }
-            } else {
-                if (payload.method) {
-                    Server.emit(payload.method, payload);
-                }
-            }
-
-            return response;
-        };
+        process.on('message', payload => receive(payload, reply => process.send(reply)));
     }
+
+    return function send(payload = {}) {
+        payload.uuid ||= uuid();
+        payload.organization_id ||= payload.socket?.organization_id;
+        if (payload.broadcast === 'false') payload.broadcast = false;
+        if (payload.serverId === undefined && payload.workerId === undefined && (!server.isPrimary || server.isWorker)) {
+            payload.workerId = server.workerId;
+        }
+        payload.serverId ??= server.id;
+        payload.status ||= 'sent';
+        if (payload.response === true) {
+            if (server.isPrimary) {
+                if (payload.workerId == null) resolveResponse(payload, payload.uuid);
+                else {
+                    const worker = server.workers.get(payload.workerId);
+                    (worker.process || worker).send(transportEnvelope(payload));
+                }
+            } else process.send(transportEnvelope(payload));
+            return Promise.resolve(payload);
+        }
+        if (server.isPrimary) return route(payload);
+        const local = Promise.resolve().then(() => deliverLocal(payload, false));
+        const response = request(message => process.send(message), payload, payload.uuid);
+        return Promise.all([local, response]).then(([, envelope]) => envelope);
+    };
 }
 
 export default { init };

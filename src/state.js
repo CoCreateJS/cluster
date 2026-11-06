@@ -467,8 +467,8 @@ export function reboot(payload = {}, fromEvent = false) {
     console.log(`[@cocreate/cluster] [MASTER] OS Reboot requested. Commencing graceful shutdown before kernel reboot...`);
     if (server.state) server.state.status = 'REBOOTING';
     
-    if (server.mesh) {
-        server.mesh.send({ method: 'mesh.node_status_update', server_id: server.id, status: 'REBOOTING' });
+    if (server.cluster) {
+        server.cluster.send({ method: 'mesh.node_status_update', server_id: server.id, status: 'REBOOTING' });
     }
     save();
 
@@ -552,8 +552,8 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
     await drain(true, true);
 
     // Step 2: Notify mesh cluster
-    if (server.mesh) {
-        server.mesh.send({
+    if (server.cluster) {
+        server.cluster.send({
             method: 'mesh.node_status_update',
             server_id: server.id,
             status: (server.state?.status || 'STOPPED').toLowerCase(),
@@ -561,8 +561,8 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
         });
         
         setTimeout(() => {
-            if (server.mesh && typeof server.mesh.close === 'function') {
-                server.mesh.close(reason);
+            if (server.cluster && typeof server.cluster.close === 'function') {
+                server.cluster.close(reason);
             }
             if (server.state) server.state.isMeshClosed = true;
             console.log("[@cocreate/cluster] [MASTER] Mesh closed successfully.");

@@ -5,16 +5,25 @@ import test from 'node:test';
 import IPC from '../src/ipc.js';
 
 function createWorker(id, received) {
-    return {
-        id,
-        isListening: true,
-        isCordoned: false,
-        isDraining: false,
+    const worker = {
+        id, isListening: true, isCordoned: false, isDraining: false, responses: [],
         process: {
             isConnected: () => true,
-            send: payload => received.push({ id, payload: { ...payload } })
+            send(payload) {
+                if (payload.response) { worker.responses.push(payload); return; }
+                received.push({ id, payload: { ...payload } });
+                queueMicrotask(() => cluster.emit('message', worker, { ...payload, response: true }));
+            }
         }
     };
+    return worker;
+}
+
+// Minimal runtime surface: production CoCreateServer supplies these methods.
+function initIPC(server, pending) {
+    server.cluster ||= { send() {} };
+    server.emitAsync ||= async (method, payload) => { server.emit(method, payload); return payload; };
+    return IPC.init(server, pending);
 }
 
 function isolateClusterListeners(t) {
@@ -32,17 +41,25 @@ function isolateClusterListeners(t) {
     });
 }
 
-test.beforeEach(isolateClusterListeners);
+test.beforeEach(t => {
+    isolateClusterListeners(t);
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'send');
+    Object.defineProperty(process, 'send', { configurable: true, value() {} });
+    t.after(() => {
+        if (descriptor) Object.defineProperty(process, 'send', descriptor);
+        else delete process.send;
+    });
+});
 
 test('targeted shutdown reaches the remote mesh without shutting down the issuing primary', async t => {
     const forwarded = [], events = [];
     const server = {
         id: 'issuing-server', cluster_id: 'cluster-1', isPrimary: true,
         workers: new Map(),
-        mesh: { send: payload => forwarded.push({ ...payload }) },
+        cluster: { send: payload => forwarded.push({ ...payload }) },
         emit: (...args) => events.push(args)
     };
-    const send = IPC.init(server, new Map());
+    const send = initIPC(server, new Map());
     await send({ method: 'shutdown', server: 'target-server', master: true, organization_id: 'tenant' });
     assert.equal(forwarded.length, 1);
     assert.equal(forwarded[0].server, 'target-server');
@@ -55,7 +72,7 @@ test('targeted shutdown executes on the target primary', async t => {
         id: 'target-server', cluster_id: 'cluster-1', isPrimary: true,
         workers: new Map(), emit: (...args) => events.push(args)
     };
-    const send = IPC.init(server, new Map());
+    const send = initIPC(server, new Map());
     await send({ method: 'shutdown', server: 'target-server', master: true, organization_id: 'tenant', serverId: 'issuing-server' });
     assert.equal(events.length, 1);
     assert.equal(events[0][0], 'shutdown');
@@ -69,10 +86,10 @@ test('a primary serving as a worker stamps its origin before mesh delivery', asy
         isWorker: true,
         workerId: 1,
         workers: new Map(),
-        mesh: { send: payload => received.push({ ...payload }) },
+        cluster: { send: payload => received.push({ ...payload }) },
         emit: () => {}
     };
-    const send = IPC.init(server, new Map());
+    const send = initIPC(server, new Map());
 
     await send({ method: 'example.changed', organization_id: 'org-1' });
     assert.equal(received.length, 1);
@@ -103,7 +120,7 @@ test('server.send stores a Promise only at the UUID origin', async () => {
         workers,
         emit: (method, payload) => emitted.push({ method, payload })
     };
-    const send = IPC.init(server, pendingPromises);
+    const send = initIPC(server, pendingPromises);
 
     const responsePromise = send({
         method: 'example.get',
@@ -133,7 +150,7 @@ test('server.send stores a Promise only at the UUID origin', async () => {
     assert.equal(emitted.length, 0);
 });
 
-test('forwarded messages do not create Promises and honor routing flags', () => {
+test('forwarded broadcasts await all workers and ignore broadcastSender', async () => {
     const received = [];
     const emitted = [];
     const pendingPromises = new Map();
@@ -147,7 +164,7 @@ test('forwarded messages do not create Promises and honor routing flags', () => 
         workers,
         emit: (method, payload) => emitted.push({ method, payload })
     };
-    IPC.init(server, pendingPromises);
+    initIPC(server, pendingPromises);
 
     cluster.emit('message', workers.get(1), {
         uuid: 'existing-uuid',
@@ -157,14 +174,17 @@ test('forwarded messages do not create Promises and honor routing flags', () => 
         master: false
     });
 
-    assert.equal(pendingPromises.size, 0);
+    assert.equal(pendingPromises.size, 2);
     assert.equal(emitted.length, 0);
-    assert.deepEqual(received.map(item => item.id), [2]);
+    assert.deepEqual(received.map(item => item.id), [1, 2]);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(pendingPromises.size, 0);
+    assert.equal(workers.get(1).responses.length, 1);
     assert.equal(received[0].payload.workerId, 1);
     assert.equal(received[0].payload.serverId, 'server-1');
 });
 
-test('broadcastSender false resolves the origin immediately', async () => {
+test('broadcastSender false still returns the completed worker envelope', async () => {
     const received = [];
     const pendingPromises = new Map();
     const workers = new Map([[1, createWorker(1, received)]]);
@@ -172,11 +192,9 @@ test('broadcastSender false resolves the origin immediately', async () => {
         id: 'server-1',
         isPrimary: true,
         workers,
-        emit: () => {
-            throw new Error('originating primary should be excluded');
-        }
+        emit() {}
     };
-    const send = IPC.init(server, pendingPromises);
+    const send = initIPC(server, pendingPromises);
     const payload = {
         method: 'example.fire-and-forget',
         broadcast: true,
@@ -185,7 +203,8 @@ test('broadcastSender false resolves the origin immediately', async () => {
 
     const result = await send(payload);
 
-    assert.equal(result, payload);
+    assert.equal(result.uuid, payload.uuid);
+    assert.equal(result.response, true);
     assert.equal(typeof payload.uuid, 'string');
     assert.equal(pendingPromises.size, 0);
     assert.equal(received.length, 1);
@@ -206,7 +225,7 @@ test('sending an existing UUID routes the response to its source worker', async 
             throw new Error('a response must not execute again on the primary');
         }
     };
-    const send = IPC.init(server, pendingPromises);
+    const send = initIPC(server, pendingPromises);
     const response = {
         uuid: 'request-uuid',
         method: 'storage.get',
@@ -221,24 +240,23 @@ test('sending an existing UUID routes the response to its source worker', async 
     await send(response);
 
     assert.equal(pendingPromises.size, 0);
-    assert.equal(received.length, 1);
-    assert.equal(received[0].id, 2);
-    assert.equal(received[0].payload.response, true);
-    assert.equal(received[0].payload.master, false);
+    assert.equal(received.length, 0);
+    assert.equal(workers.get(2).responses.length, 1);
+    assert.equal(workers.get(2).responses[0].response, true);
 });
 
-test('server and cluster targets are handed to mesh.send by the primary', async () => {
+test('server and cluster targets are handed to cluster.send by the primary', async () => {
     const meshMessages = [];
     const server = {
         id: 'server-1',
         isPrimary: true,
         workers: new Map(),
-        mesh: {
+        cluster: {
             send: payload => meshMessages.push(payload)
         },
         emit: () => {}
     };
-    const send = IPC.init(server, new Map());
+    const send = initIPC(server, new Map());
 
     await send({
         method: 'configuration.refresh',
@@ -263,12 +281,12 @@ test('worker-originated server targets are forwarded into the mesh', () => {
         id: 'server-1',
         isPrimary: true,
         workers: new Map([[1, sourceWorker]]),
-        mesh: {
+        cluster: {
             send: payload => meshMessages.push(payload)
         },
         emit: () => {}
     };
-    IPC.init(server, new Map());
+    initIPC(server, new Map());
 
     cluster.emit('message', sourceWorker, {
         uuid: 'worker-originated-uuid',
@@ -298,7 +316,7 @@ test('organization messages route only to registered workers and exclude their o
         id: 'server-1',
         isPrimary: true,
         workers,
-        mesh: {
+        cluster: {
             send: payload => meshMessages.push({ ...payload }),
             openOrganization: () => assert.fail('IPC must notify listeners, not call Mesh directly'),
             closeOrganization: () => assert.fail('IPC must notify listeners, not call Mesh directly')
@@ -308,7 +326,7 @@ test('organization messages route only to registered workers and exclude their o
             if (event === 'orgDisconnected') closedOrganizations.push(payload.organization_id);
         }
     };
-    IPC.init(server, new Map());
+    initIPC(server, new Map());
 
     cluster.emit('message', workers.get(1), {
         method: 'orgConnected',
@@ -329,15 +347,15 @@ test('organization messages route only to registered workers and exclude their o
     assert.deepEqual(received.map(item => item.id), [2]);
     const deliveries = [];
     const previousListeners = new Set(process.listeners('message'));
-    IPC.init({
+    initIPC({
         isPrimary: false,
-        wsManager: { send: payload => deliveries.push(payload) },
+        socket: { send: payload => deliveries.push(payload) },
         emit() { assert.fail('Organization delivery must not execute the operation again'); }
     }, new Map());
     const workerListener = process.listeners('message').find(listener => !previousListeners.has(listener));
     t.after(() => process.removeListener('message', workerListener));
     await workerListener(received[0].payload);
-    assert.deepEqual(deliveries, [{ ...received[0].payload, serverSent: true }]);
+    assert.deepEqual(deliveries, [received[0].payload]);
     assert.deepEqual(openedOrganizations, ['organization-1']);
     assert.equal(meshMessages.filter(item => item.uuid === 'organization-message').length, 1);
 
@@ -363,7 +381,7 @@ test('last worker exit emits orgDisconnected locally even without Mesh installed
     const events = [];
     const server = { id: 'server-1', isPrimary: true, workers: new Map(),
         emit: (event, payload) => events.push([event, payload]) };
-    const send = IPC.init(server, new Map());
+    const send = initIPC(server, new Map());
     send({ method: 'orgConnected', organization_id: 'tenant', workerId: 1 });
     send({ method: 'orgConnected', organization_id: 'tenant', workerId: 2 });
     assert.deepEqual(events, [['orgConnected', { organization_id: 'tenant' }]]);
@@ -382,7 +400,7 @@ test('connected reports emit once per organization until all worker registration
     const events = [];
     const server = { id: 'node', isPrimary: true, workers: new Map(),
         emit: (event, payload) => events.push([event, payload.organization_id]) };
-    const send = IPC.init(server, new Map());
+    const send = initIPC(server, new Map());
     for (const workerId of [1, 1, 2, 3]) send({ method: 'orgConnected', organization_id: 'tenant', workerId });
     send({ method: 'orgConnected', organization_id: 'another', workerId: 1 });
     assert.deepEqual(events, [['orgConnected', 'tenant'], ['orgConnected', 'another']]);
@@ -407,7 +425,7 @@ test('worker IPC forwards local presence events once without reflecting server e
     Object.defineProperty(process, 'send', { configurable: true, value: payload => sent.push(payload) });
     Object.defineProperty(process, 'connected', { configurable: true, value: true });
     const server = { isPrimary: false, isWorker: true, workerId: 3, emit() {} };
-    server.send = IPC.init(server, new Map());
+    server.send = initIPC(server, new Map());
     process.emit('orgConnected', 'tenant', { workerId: 3 });
     process.emit('orgDisconnected', 'tenant', { workerId: 3 });
     assert.deepEqual(sent.map(({ method, organization_id, workerId }) => ({ method, organization_id, workerId })), [
@@ -422,11 +440,186 @@ test('a primary serving clients aggregates local process events without sending 
     const server = { isPrimary: true, isWorker: true, workerId: 1, workers: new Map(),
         emit: (event, payload) => events.push([event, payload.organization_id]) };
     server.send = () => assert.fail('Primary presence must aggregate directly');
-    IPC.init(server, new Map());
+    initIPC(server, new Map());
     process.emit('orgConnected', 'tenant', { workerId: 1 });
     process.emit('orgConnected', 'tenant', { workerId: 2 });
     process.emit('orgDisconnected', 'tenant', { workerId: 1 });
     assert.deepEqual(events, [['orgConnected', 'tenant']]);
     process.emit('orgDisconnected', 'tenant', { workerId: 2 });
     assert.deepEqual(events, [['orgConnected', 'tenant'], ['orgDisconnected', 'tenant']]);
+});
+
+// A blocked local socket must not hold up other workers or network routing.
+test('send starts local, worker and cluster delivery independently and awaits local completion', async () => {
+    const received = [], forwarded = [], local = [];
+    const pending = new Map();
+    let finishLocal;
+    const localCompletion = new Promise(resolve => { finishLocal = resolve; });
+    const server = {
+        id: 'node', cluster_id: 'cluster', isPrimary: true, isWorker: true, workerId: 1,
+        workers: new Map([[1, createWorker(1, received)], [2, createWorker(2, received)]]),
+        organizationWorkers: new Map([['org', new Set([1, 2])]]),
+        socket: { send: data => { local.push(data); return localCompletion; } },
+        cluster: { send: data => forwarded.push(data) }, emit() {}
+    };
+    server.send = initIPC(server, pending);
+    const socket = {}; socket.self = socket;
+    const payload = { method: 'object.read', organization_id: 'org', clientId: 'client', socket,
+        broadcastSender: true };
+    let complete = false;
+    const result = server.send(payload).then(value => { complete = true; return value; });
+    assert.equal(forwarded.length, 1);
+    assert.deepEqual(received.map(item => item.id), [2]);
+    assert.equal('socket' in forwarded[0], false);
+    assert.equal('socket' in received[0].payload, false);
+    assert.doesNotThrow(() => JSON.stringify(forwarded[0]));
+    assert.equal(pending.size, 1, 'The worker receipt uses the same correlation path as other requests');
+    await Promise.resolve();
+    assert.equal(local.length, 1);
+    assert.equal(local[0].socket, socket);
+    assert.equal(complete, false);
+    assert.equal(pending.size, 0);
+    finishLocal();
+    assert.equal((await result).uuid, payload.uuid);
+});
+
+test('destination server, cluster and worker filters apply before local client delivery', async () => {
+    const local = [], received = [];
+    const server = { id: 'node', cluster_id: 'cluster', isPrimary: true, isWorker: true, workerId: 1,
+        workers: new Map([[2, createWorker(2, received)]]),
+        organizationWorkers: new Map([['org', new Set([2])]]),
+        socket: { send: data => local.push(data) }, cluster: { send() {} }, emit() {} };
+    const send = initIPC(server, new Map());
+    for (const target of [{ server: 'other' }, { cluster: 'other' }, { worker: 2 }]) {
+        await send({ method: 'object.read', organization_id: 'org', ...target });
+    }
+    assert.equal(local.length, 0);
+    assert.equal(received.length, 1);
+    assert.equal(received[0].id, 2);
+});
+
+test('local socket failure does not prevent forwarding and rejects the caller await', async () => {
+    const received = [], forwarded = [];
+    const server = { id: 'node', isPrimary: true, workers: new Map([[2, createWorker(2, received)]]),
+        organizationWorkers: new Map([['org', new Set([2])]]),
+        socket: { send() { throw new Error('local delivery failed'); } },
+        cluster: { send: data => forwarded.push(data) }, emit() {} };
+    const send = initIPC(server, new Map());
+    await assert.rejects(send({ method: 'object.read', organization_id: 'org' }), /local delivery failed/);
+    assert.equal(received.length, 1);
+    assert.equal(forwarded.length, 1);
+});
+
+test('remote worker IDs do not exclude a same-numbered local worker', async () => {
+    const received = [];
+    const server = { id: 'node', isPrimary: true, workers: new Map([[1, createWorker(1, received)]]),
+        organizationWorkers: new Map([['org', new Set([1])]]), emit() {} };
+    await initIPC(server, new Map())({ method: 'object.read', organization_id: 'org',
+        serverId: 'remote-node', workerId: 1, broadcastSender: false });
+    assert.deepEqual(received.map(item => item.id), [1]);
+});
+
+test('a worker sends locally and upstream once; receiving another worker delivery stays local', async t => {
+    const upstream = [], local = [], events = [];
+    const descriptors = new Map(['send', 'connected'].map(key => [key, Object.getOwnPropertyDescriptor(process, key)]));
+    t.after(() => {
+        for (const [key, descriptor] of descriptors) {
+            if (descriptor) Object.defineProperty(process, key, descriptor);
+            else delete process[key];
+        }
+    });
+    Object.defineProperty(process, 'send', { configurable: true, value: data => {
+        upstream.push(data);
+        if (!data.response) queueMicrotask(() => process.emit('message', { ...data, response: true }));
+    } });
+    Object.defineProperty(process, 'connected', { configurable: true, value: true });
+    const previous = new Set(process.listeners('message'));
+    const pending = new Map();
+    const server = { id: 'node', isPrimary: false, workerId: 1,
+        socket: { send: data => local.push(data) }, emit: (...args) => events.push(args) };
+    server.send = initIPC(server, pending);
+    const socket = {}; socket.self = socket;
+    await server.send({ method: 'object.read', organization_id: 'org', socket, broadcastSender: true });
+    assert.equal(local.length, 1);
+    assert.equal(upstream.length, 1);
+    assert.equal(upstream[0].serverId, 'node');
+    assert.equal(upstream[0].workerId, 1);
+    assert.equal('socket' in upstream[0], false);
+    assert.equal(pending.size, 0);
+    const receive = process.listeners('message').find(listener => !previous.has(listener));
+    await receive({ method: 'object.read', organization_id: 'org', serverId: 'remote', workerId: 2 });
+    assert.equal(local.length, 2);
+    assert.equal(upstream.filter(data => !data.response).length, 1, 'Incoming delivery only sends its terminal reply');
+    await receive({ method: 'object.read', organization_id: 'org', worker: 2 });
+    assert.equal(local.length, 2, 'A delivery targeted to another worker must not reach this worker');
+    assert.equal(events.length, 0);
+});
+
+test('an attached socket supplies missing organization scope before routing', async () => {
+    const local = [], forwarded = [];
+    const server = { id: 'node', isPrimary: true, workers: new Map(),
+        socket: { send: data => local.push(data) }, cluster: { send: data => forwarded.push(data) }, emit() {} };
+    const payload = { method: 'workflow.complete', socket: { organization_id: 'org' }, broadcastSender: true };
+    const pending = new Map();
+    await initIPC(server, pending)(payload);
+    assert.equal(payload.organization_id, 'org');
+    assert.equal(local.length, 1);
+    assert.equal(forwarded.length, 1);
+    assert.equal(pending.size, 0);
+});
+
+test('local eviction cannot remove peer and worker routes before their sends are dispatched', async () => {
+    const received = [], forwarded = [];
+    const peers = new Set(['remote']);
+    const server = { id: 'node', isPrimary: true, workers: new Map([[2, createWorker(2, received)]]),
+        organizationWorkers: new Map([['org', new Set([2])]]),
+        socket: { send() { peers.clear(); server.organizationWorkers.clear(); } },
+        cluster: { send() { forwarded.push([...peers]); } }, emit() {} };
+    await initIPC(server, new Map())({ method: 'organization.evicted', organization_id: 'org' });
+    assert.deepEqual(forwarded, [['remote']]);
+    assert.equal(received.length, 1);
+    assert.equal(peers.size, 0);
+});
+
+test('worker exit rejects its unfinished request and clears correlation', async () => {
+    const worker = { id: 2, process: { send() {} } };
+    const pending = new Map();
+    const server = { id: 'node', isPrimary: true, workers: new Map([[2, worker]]), emit() {} };
+    const send = initIPC(server, pending);
+    const failed = assert.rejects(send({ method: 'example.work', worker: 2, master: false }), /exited before replying/);
+    assert.equal(pending.size, 1);
+    cluster.emit('exit', worker);
+    await failed;
+    assert.equal(pending.size, 0);
+});
+
+test('unmatched responses never execute a method or generate another response', async () => {
+    const received = [];
+    const server = { id: 'node', isPrimary: true, workers: new Map(),
+        emit() { assert.fail('An unmatched response must not execute'); } };
+    initIPC(server, new Map());
+    const worker = createWorker(1, received);
+    cluster.emit('message', worker, { method: 'example.work', uuid: 'finished', response: true });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(received, []);
+    assert.deepEqual(worker.responses, []);
+});
+
+test('request correlation uses native worker IDs while presence uses the logical slot', async () => {
+    const pending = new Map();
+    const process = { id: 41, send(payload) {
+        queueMicrotask(() => cluster.emit('message', process, { ...payload, response: true, result: 'ok' }));
+    } };
+    const server = { id: 'node', isPrimary: true,
+        workers: new Map([[2, { id: 2, process }]]),
+        organizationWorkers: new Map([['org', new Set([2])]]), emit() {} };
+    const send = initIPC(server, pending);
+    assert.equal((await send({ method: 'example.work', worker: 2, master: false })).result, 'ok');
+    assert.equal(pending.size, 0);
+    process.send = () => {};
+    const failed = assert.rejects(send({ method: 'example.work', worker: 2, master: false }), /exited before replying/);
+    cluster.emit('exit', process);
+    await failed;
+    assert.equal(pending.size, 0);
+    assert.equal(server.organizationWorkers.has('org'), false);
 });

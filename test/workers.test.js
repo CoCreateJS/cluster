@@ -202,7 +202,8 @@ test('CoCreateServer exposes the managed Map without a runtime totalWorkers prop
     const { CoCreateServer, ClusterManager } = await import('../src/index.js');
     const server = new CoCreateServer();
     assert(server.workers instanceof Workers);
-    assert.equal(server.cluster, server.workers);
+    assert.notEqual(server.cluster, server.workers);
+    assert.equal(typeof server.cluster.send, 'function');
     assert.equal(ClusterManager, Workers);
     assert.equal('totalWorkers' in server, false);
 });
@@ -262,4 +263,19 @@ test('single-process startup retains worker1 profile and clears old child slots'
     assert.equal(profile['$unset.worker1'], undefined);
     assert.equal(profile['$unset.worker2'], true);
     assert.doesNotThrow(() => workers.initialState(null));
+});
+
+test('awaited event dispatch returns the envelope and respects once listeners', async () => {
+    const { CoCreateServer } = await import('../src/index.js');
+    const server = new CoCreateServer();
+    let calls = 0;
+    server.once('example.request', async payload => {
+        await new Promise(resolve => setImmediate(resolve));
+        calls++;
+        return { ...payload, result: 'done' };
+    });
+    const payload = { method: 'example.request', uuid: 'event-uuid' };
+    assert.equal((await server.emitAsync(payload.method, payload)).result, 'done');
+    assert.equal(await server.emitAsync(payload.method, payload), payload);
+    assert.equal(calls, 1);
 });

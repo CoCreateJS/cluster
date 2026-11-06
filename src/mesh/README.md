@@ -83,6 +83,14 @@ The Primary process:
 
 ---
 
+## Public server interface
+
+The cluster module attaches this transport as `server.cluster`. Use
+`server.send(envelope)` for component messages, `server.cluster.send(envelope)`
+for direct peer transmission, and `server.socket.send(envelope)` for local client
+delivery. Network connections remain primary-owned; direct worker cluster sends
+relay through IPC. The source directory and Mesh class names are unchanged.
+
 ## Installation
 
 ### NPM

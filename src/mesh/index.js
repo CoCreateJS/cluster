@@ -115,7 +115,7 @@ export class ServerMesh extends EventEmitter {
         }
 
         this.server = server;
-        this.server.mesh = this; // Attach mesh instance directly to server context
+        this.server.cluster = this; // Attach mesh instance directly to server context
         this.isClosed = false;
 
         // Register IPC listeners on server context

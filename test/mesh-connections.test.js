@@ -146,3 +146,22 @@ test('own-organization messaging can close while node control connectivity remai
     assert.equal(mesh.activeConnections.get('control:peer'), sockets[0]);
     assert.equal(sockets[1].readyState, 3);
 });
+
+test('worker Mesh attaches as server.cluster and forwards direct sends through primary IPC', async () => {
+    const server = new EventEmitter();
+    const forwarded = [];
+    Object.assign(server, { id: 'worker-node', workerId: 2, isPrimary: false,
+        send: data => forwarded.push(data) });
+    const mesh = new ServerMesh();
+    mesh.inboundManager.init = () => assert.fail('Workers must not open the node listener');
+    mesh.outboundManager.init = () => assert.fail('Workers must not open peer connections');
+    await mesh.init(server);
+    assert.equal(server.cluster, mesh);
+    assert.equal(server.mesh, undefined);
+    const payload = { method: 'cursor', organization_id: 'org' };
+    server.cluster.send(payload);
+    assert.equal(forwarded.length, 1);
+    assert.equal(forwarded[0].method, 'mesh.outbound_mesh_relay');
+    assert.equal(forwarded[0].payload, payload);
+    assert.equal(payload.serverId, 'worker-node');
+});

@@ -329,10 +329,35 @@ processes have no child entries of their own; their empty collections report zer
 The existing persisted/telemetry `totalWorkers` field derives from the live Map,
 rather than acting as another runtime counter.
 
-`server.send()` continues using IPC. Mesh remains at `server.mesh`; this change
-does not rename network or client messaging. The existing `server.cluster`
-reference, `ClusterManager` named export, and manager `.workers` view remain
-compatibility references to the same collection, with no second worker registry.
+`server.workers` is the local process collection. Mesh is attached as
+`server.cluster`; its implementation remains in `src/mesh/`. The `ClusterManager`
+named export and manager `.workers` view remain compatibility references to the
+worker collection. `server.cluster` no longer aliases workers.
+
+### Sending
+
+Components call `server.send(envelope)` to coordinate delivery. It starts eligible
+local `server.socket.send()` delivery without awaiting it before dispatching IPC
+to registered organization workers and `server.cluster.send()` on the primary.
+Workers receiving organization envelopes deliver locally without forwarding them
+again. `server`, `cluster`, and `worker` destinations are checked before local
+socket delivery; live socket references are retained locally and removed from
+transport envelopes.
+
+`server.socket.send()` is local-only and resolves to `undefined` after its local
+write attempts. `server.cluster.send()` is the direct peer transport; on workers
+it relays through the primary. Awaiting `server.send()` waits for local socket
+completion and every targeted local worker's reply. Each IPC request preserves
+or creates a UUID, receives an envelope reply, and clears its pending reference.
+This behavior does not depend on `broadcastSender`, whether the caller awaits,
+or whether it uses the returned value. Responses marked `response: true` only
+complete pending requests and never execute again. Broadcast sends wait for all
+targeted workers and return one envelope; they do not return a results array.
+Application errors from another process are returned in its envelope; transport
+failures reject. This does not promise application processing or delivery
+acknowledgement from every remote network client.
+Origin `serverId` and `workerId` metadata prevents duplicate delivery; Socket
+Server no longer needs a forwarding-loop flag.
 
 ### Status Events
 
@@ -623,7 +648,7 @@ server.storage.on(
 Cluster owns its inter-server mesh implementation in `src/mesh`.
 
 ```javascript
-server.mesh.send({
+server.cluster.send({
 	method: "mesh.custom_command",
 	server: "server_b_id",
 	data: {

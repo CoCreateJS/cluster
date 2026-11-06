@@ -59,8 +59,9 @@ async function setup(t, { minimum = 0, enabled = true, workers = 1, telemetry = 
     });
     const mesh = new ServerMesh();
     mesh.server = server;
-    server.mesh = mesh;
+    server.cluster = mesh;
     mesh.setupServerListeners();
+    server.emitAsync = async (method, payload) => { await Promise.all(server.listeners(method).map(listener => listener(payload))); return payload; };
     server.send = IPC.init(server, new Map());
     await initAutoscaler(server);
     const managers = Array.from({ length: workers }, (_, index) => {
