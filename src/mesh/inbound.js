@@ -19,6 +19,16 @@ export class ServerMeshInbound {
         this.meshWss = null;
         this.heartbeatInterval = null;
         this.heartbeatMs = 30000;
+        this.reconnectTimers = new Map();
+    }
+
+    closeOrganization(organization_id) {
+        for (const [key, { timer, socket }] of this.reconnectTimers) {
+            if (!key.startsWith(`${organization_id}:`)) continue;
+            clearTimeout(timer);
+            this.reconnectTimers.delete(key);
+            this.mesh.removeSocketFromAllOrgServers(socket);
+        }
     }
 
     /**
@@ -146,11 +156,19 @@ export class ServerMeshInbound {
                 this.mesh.handleIncomingMessage(rawData, ws);
             });
 
-            ws.on('close', () => {
+            ws.on('close', code => {
                 console.log(`[@cocreate/server-mesh/inbound] Inbound peer connection ${identifier} dropped.`);
-                this.mesh.activeConnections.delete(identifier);
-                if (remoteServerId) this.mesh.activeConnections.delete(ip);
-                this.mesh.removeSocketFromAllOrgServers(ws);
+                if (this.mesh.isClosed || ws.intentionalClose || code === 1000) {
+                    this.mesh.removeSocketFromAllOrgServers(ws);
+                    return;
+                }
+                // The outbound owner retries; retain this peer until it reconnects
+                // or that recovery window expires, without starting a second dialer.
+                const timer = setTimeout(() => {
+                    this.reconnectTimers.delete(connectionKey);
+                    this.mesh.removeSocketFromAllOrgServers(ws);
+                }, this.mesh.outboundManager.reconnectWaitMs);
+                this.reconnectTimers.set(connectionKey, { timer, socket: ws });
             });
 
             ws.on('error', (err) => {
@@ -158,6 +176,12 @@ export class ServerMeshInbound {
             });
 
             const connectionKey = `${organization_id || 'control'}:${identifier}`;
+            const pending = this.reconnectTimers.get(connectionKey);
+            if (pending) {
+                clearTimeout(pending.timer);
+                this.reconnectTimers.delete(connectionKey);
+                this.mesh.removeSocketFromAllOrgServers(pending.socket);
+            }
             this.mesh.activeConnections.set(connectionKey, ws);
             ws.isControlSocket = !organization_id;
             if (ws.isControlSocket) this.mesh.syncOrganizations(ws);
@@ -221,6 +245,12 @@ export class ServerMeshInbound {
      * @returns {Promise<void>}
      */
     async close() {
+        const pending = [...this.reconnectTimers.values()];
+        this.reconnectTimers.clear();
+        for (const { timer, socket } of pending) {
+            clearTimeout(timer);
+            this.mesh.removeSocketFromAllOrgServers(socket);
+        }
         if (this.heartbeatInterval) {
             clearInterval(this.heartbeatInterval);
             this.heartbeatInterval = null;

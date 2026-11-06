@@ -58,7 +58,8 @@ async function setup(t, options = {}) {
                     name: 'tenant-storage', provider: 'mongodb', connectionString: 'mongodb://tenant-only.test'
                 } }] };
                 if (request.array === 'clusters') {
-                    assert.equal(query._id, clusterId);
+                    if (query._id) assert.equal(query._id, clusterId);
+                    else assert.deepEqual(query, { type: 'organization', 'manager.for': tenant, 'manager.organization_id': platform });
                     assert.equal(query.type, 'organization');
                     return { object: options.foreignCluster ? [] : [cluster] };
                 }
@@ -313,4 +314,39 @@ test('creation retains its existing two-minute startup observation', async t => 
     assert.match(logs[0][0], /No managed startup update/);
     assert.equal(logs[0][1], result.server._id);
     assert.equal(calls.length, 1);
+});
+
+
+test('startCluster resolves the managed cluster and creates without a second server discovery read', async t => {
+    const { handler, requests, calls, inventory } = await setup(t);
+    assert.equal(handler.startCluster(tenant), undefined);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(requests.filter(request => request.array === 'clusters').length, 1);
+    assert.equal(requests.filter(request => request.array === 'servers' && request.method === 'object.read').length, 0);
+    assert.equal(calls.length, 1);
+    assert.equal(inventory.size, 1);
+});
+
+for (const scenario of ['disabled', 'own organization', 'worker', 'unmanaged organization']) {
+    test(`startCluster skips ${scenario} within Manager`, async t => {
+        const { handler, server, requests, calls } = await setup(t, {
+            enabled: scenario !== 'disabled', foreignCluster: scenario === 'unmanaged organization'
+        });
+        if (scenario === 'worker') server.isPrimary = false;
+        assert.equal(handler.startCluster(scenario === 'own organization' ? platform : tenant), undefined);
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(calls.length, 0);
+        assert.equal(requests.length, scenario === 'unmanaged organization' ? 1 : 0);
+    });
+}
+
+test('startCluster reports detached creation failures inside Manager', async t => {
+    const { handler, inventory } = await setup(t, { failProvider: true });
+    const logs = [];
+    t.mock.method(console, 'error', (...args) => logs.push(args));
+    assert.equal(handler.startCluster(tenant), undefined);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(inventory.size, 1);
+    assert.equal([...inventory.values()][0].master.status, 'failed');
+    assert(logs.some(args => args[0].includes('Organization cluster startup failed')));
 });

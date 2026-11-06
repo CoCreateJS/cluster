@@ -3,105 +3,124 @@ import test from 'node:test';
 import { ServerMesh } from '../src/mesh/index.js';
 
 const tenant = 'aaaaaaaaaaaaaaaaaaaaaaaa';
-const cluster = { _id: 'cluster-1', type: 'organization', name: 'Production', host: 'tenant.test', manager: { organization_id: 'platform', host: 'platform.test', for: tenant } };
+const flush = () => new Promise(resolve => setImmediate(resolve));
 
-function setup({ records = [], enabled = true, matchingCluster = true, failRead = false } = {}) {
+function setup({ records = [], response, pendingRead } = {}) {
     const mesh = new ServerMesh();
-    const calls = [], reads = [];
+    const calls = [], reads = [], connections = [], announcements = [];
     mesh.server = {
         isPrimary: true, id: 'platform-node', organization_id: 'platform', host: 'platform.test',
-        manager: { config: { enabled }, createServer: async definition => {
-            calls.push(definition);
-            return { status: 'created' };
-        } },
+        manager: { startCluster: id => { calls.push(id); } },
         crud: { send: async request => {
             reads.push(request);
-            if (failRead) return { error: ['Unavailable'] };
-            if (request.array === 'clusters') {
-                assert.deepEqual(request.filter.query, { type: 'organization', 'manager.for': tenant, 'manager.organization_id': 'platform' });
-                return { object: matchingCluster ? [cluster] : [] };
-            }
             assert.equal(request.array, 'servers');
             assert.equal(request.organization_id, 'platform');
             assert.equal(request.host, 'platform.test');
-            assert.deepEqual(request.filter.query, { cluster_id: cluster._id, 'master.status': 'running' });
-            return { object: records.filter(record => record.cluster_id === cluster._id && record.master.status === 'running') };
+            assert.deepEqual(request.filter.query, {
+                _id: { $lt: 'platform-node' }, 'master.status': 'running',
+                ...(request.filter.query.tenant_organization_id && { tenant_organization_id: tenant })
+            });
+            return pendingRead || response || { object: records };
         } }
     };
-    return { mesh, calls, reads };
+    mesh.outboundManager.server = mesh.server;
+    mesh.outboundManager.connectPeer = (...args) => connections.push(args);
+    mesh.announceOrganization = id => announcements.push(id);
+    return { mesh, calls, reads, connections, announcements };
 }
 
-test('Mesh decides creation from the target cluster running inventory and passes the stored definition', async () => {
+test('empty organization discovery notifies Manager using the same single server read', async () => {
     const { mesh, calls, reads } = setup();
-    assert.deepEqual(await mesh.checkOrganizationServers(tenant), { status: 'created' });
-    assert.deepEqual(calls, [cluster]);
-    assert.deepEqual(reads.map(read => read.array), ['clusters', 'servers']);
-    assert.equal(reads[1].filter.query._id, undefined, 'creation is independent of older-peer ordering');
+    mesh.openOrganization(tenant);
+    await flush();
+    assert.deepEqual(calls, [tenant]);
+    assert.equal(reads.length, 1);
+
 });
 
-test('a running server blocks creation even when its ID is newer than the platform node', async () => {
-    const { mesh, calls } = setup({ records: [{ _id: 'zzzzzzzz', cluster_id: cluster._id, master: { status: 'running' } }] });
-    await mesh.checkOrganizationServers(tenant);
+test('one organization discovery result drives peer connections and avoids cluster startup', async () => {
+    const peer = { _id: 'older-peer', ip: '192.0.2.1' };
+    const { mesh, calls, reads, connections } = setup({ records: [peer] });
+    mesh.outboundManager.peers = [{ _id: 'control-peer' }];
+    mesh.openOrganization(tenant);
+    await flush();
     assert.deepEqual(calls, []);
+    assert.equal(reads.length, 1);
+    assert.deepEqual(connections, [[peer, 1, tenant]]);
+    assert.deepEqual(mesh.outboundManager.peers, [{ _id: 'control-peer' }]);
 });
 
-for (const status of ['failed', 'terminating', 'terminated', 'stopped', 'provisioning']) {
-    test(`${status} inventory remains untouched and does not block a new deployment`, async () => {
-        const record = { _id: 'existing', cluster_id: cluster._id, master: { status } };
-        const { mesh, calls } = setup({ records: [record] });
-        await mesh.checkOrganizationServers(tenant);
-        assert.deepEqual(calls, [cluster]);
-        assert.equal(record.master.status, status);
+test('startup and activation call the same discovery function with their organization ID', async () => {
+    const { mesh } = setup();
+    const calls = [];
+    mesh.outboundManager.getServers = id => { calls.push(id); };
+    await mesh.outboundManager.init(mesh.server);
+    mesh.openOrganization(tenant);
+    mesh.openOrganization('platform');
+    assert.deepEqual(calls, ['platform', tenant, 'platform']);
+    assert.equal(mesh.checkOrganizationServers, undefined);
+});
+
+for (const response of [{ error: ['Unavailable'] }, { success: false }, {}, { object: null }]) {
+    test(`failed discovery ${JSON.stringify(response)} does not trigger provisioning`, async t => {
+        const { mesh, calls } = setup({ response });
+        const logs = [];
+        t.mock.method(console, 'error', (...args) => logs.push(args));
+        mesh.openOrganization(tenant);
+        await flush();
+        assert.deepEqual(calls, []);
+        assert.equal(logs.length, 1);
     });
 }
 
-test('another cluster running inventory does not block creation', async () => {
-    const { mesh, calls } = setup({ records: [{ _id: 'other', cluster_id: 'other-cluster', master: { status: 'running' } }] });
-    await mesh.checkOrganizationServers(tenant);
-    assert.equal(calls.length, 1);
-});
-
-test('unmanaged organizations have no cluster creation decision', async () => {
-    const { mesh, calls, reads } = setup({ matchingCluster: false });
-    await mesh.checkOrganizationServers(tenant);
-    assert.deepEqual(calls, []);
-    assert.equal(reads.length, 1);
-});
-
-test('failed inventory reads do not count as an empty running inventory', async () => {
-    const { mesh, calls } = setup({ failRead: true });
-    await assert.rejects(mesh.checkOrganizationServers(tenant), /Unable to read/);
-    assert.deepEqual(calls, []);
-});
-
-test('activation preserves immediate announcement while its creation decision completes asynchronously', async t => {
-    const { mesh, calls } = setup();
-    const events = [];
-    let reject;
-    mesh.server.manager.createServer = definition => {
-        calls.push(definition);
-        return new Promise((resolve, fail) => { reject = fail; });
+test('organization activation announces immediately without waiting for discovery or provisioning', async () => {
+    let resolve;
+    const pendingRead = new Promise(done => { resolve = done; });
+    const { mesh, calls, announcements } = setup({ pendingRead });
+    mesh.server.manager.startCluster = id => {
+        calls.push(id);
+        return new Promise(() => {});
     };
-    mesh.announceOrganization = id => events.push(`announce:${id}`);
-    t.mock.method(console, 'error', () => events.push('reported'));
-    mesh.openOrganization(tenant);
-    assert.deepEqual(events, [`announce:${tenant}`]);
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(calls.length, 1);
-    reject(new Error('Cloud operation failed'));
-    await new Promise(resolve => setImmediate(resolve));
-    assert.equal(events.at(-1), 'reported');
+    assert.equal(mesh.openOrganization(tenant), undefined);
+    assert.deepEqual(announcements, [tenant]);
+    assert.deepEqual(calls, []);
+    resolve({ object: [] });
+    await flush();
+    assert.deepEqual(calls, [tenant]);
 });
 
-test('disabled activation, own organization and workers do not start platform provisioning', async () => {
-    const { mesh, calls, reads } = setup({ enabled: false });
-    mesh.announceOrganization = () => {};
+test('Mesh delegates policy to Manager and does not read manager settings', async () => {
+    const { mesh, calls } = setup();
+    Object.defineProperty(mesh.server.manager, 'config', { get() { throw new Error('Mesh must not read Manager policy'); } });
     mesh.openOrganization(tenant);
-    mesh.server.manager.config.enabled = true;
-    mesh.openOrganization('platform');
+    await flush();
+    assert.deepEqual(calls, [tenant]);
+});
+
+test('workers do not initiate organization discovery', async () => {
+    const { mesh, calls, reads } = setup();
     mesh.server.isPrimary = false;
     mesh.openOrganization(tenant);
-    await new Promise(resolve => setImmediate(resolve));
+    await flush();
     assert.deepEqual(calls, []);
     assert.deepEqual(reads, []);
+});
+
+
+test('own-organization activation discovers and connects control peers without requesting startup', async () => {
+    const peer = { _id: 'older-peer', ip: '192.0.2.1' };
+    const { mesh, calls, reads, connections } = setup({ records: [peer] });
+    mesh.openOrganization('platform');
+    await flush();
+    assert.deepEqual(calls, []);
+    assert.equal(reads.length, 1);
+    assert.equal(reads[0].filter.query.tenant_organization_id, undefined);
+    assert.deepEqual(connections, [[peer, 1, undefined]]);
+});
+
+test('own-organization startup with no peers never requests another cluster', async () => {
+    const { mesh, calls, reads } = setup();
+    await mesh.outboundManager.init(mesh.server);
+    assert.deepEqual(calls, []);
+    assert.equal(reads.length, 1);
 });

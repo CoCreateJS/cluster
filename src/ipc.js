@@ -89,23 +89,26 @@ export function init(Server, pendingPromises) {
         }
 
         const isActive = organizationWorkers.has(organizationId);
-        if (wasActive === isActive || !Server.mesh) return;
+        if (wasActive === isActive) return;
 
-        if (isActive) {
-            Server.mesh.openOrganization?.(organizationId);
-        } else {
-            Server.mesh.closeOrganization?.(organizationId);
-        }
+        Server.emit(isActive ? 'orgConnected' : 'orgDisconnected', { organization_id: organizationId });
+    }
+
+    // Socket Server emits process-local transitions. IPC owns transport and
+    // aggregates locally when the primary also serves clients. Aggregate events
+    // use Server.emit, so they cannot feed back into these process listeners.
+    for (const method of ['orgConnected', 'orgDisconnected']) {
+        process.on(method, (organization_id, details = {}) => {
+            const payload = { method, organization_id, workerId: details.workerId ?? Server.workerId };
+            if (Server.isPrimary) updateOrganizationWorker(payload, method === 'orgDisconnected');
+            else Server.send(payload);
+        });
     }
 
     if (Server.isPrimary) {
         cluster.on('exit', (worker) => {
-            for (const [organizationId, workers] of organizationWorkers) {
-                if (!workers.delete(worker.id)) continue;
-                if (workers.size) continue;
-
-                organizationWorkers.delete(organizationId);
-                Server.mesh?.closeOrganization?.(organizationId);
+            for (const organizationId of organizationWorkers.keys()) {
+                updateOrganizationWorker({ organization_id: organizationId, workerId: worker.id }, true);
             }
         });
 
@@ -124,11 +127,11 @@ export function init(Server, pendingPromises) {
             }
             message.status = 'sent';
 
-            if (message.method === 'registerOrg') {
+            if (message.method === 'orgConnected') {
                 updateOrganizationWorker(message);
                 return;
             }
-            if (message.method === 'deregisterOrg') {
+            if (message.method === 'orgDisconnected') {
                 updateOrganizationWorker(message, true);
                 return;
             }
@@ -321,11 +324,11 @@ export function init(Server, pendingPromises) {
                 payload.status = 'sent';
             }
 
-            if (payload.method === 'registerOrg') {
+            if (payload.method === 'orgConnected') {
                 updateOrganizationWorker(payload);
                 return Promise.resolve(payload);
             }
-            if (payload.method === 'deregisterOrg') {
+            if (payload.method === 'orgDisconnected') {
                 updateOrganizationWorker(payload, true);
                 return Promise.resolve(payload);
             }

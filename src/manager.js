@@ -131,6 +131,21 @@ export async function init(server) {
             throw error;
         }
     }
+    function startCluster(organizationId) {
+        if (!server.isPrimary || !settings.enabled || !organizationId || organizationId === server.organization_id) return;
+        read('clusters', {
+            type: 'organization', 'manager.for': organizationId,
+            'manager.organization_id': server.organization_id
+        }).then(([cluster]) => {
+            if (cluster) return createServer(cluster);
+        }).catch(error => {
+            console.error('[@cocreate/cluster] Organization cluster startup failed:', {
+                organization_id: organizationId,
+                error_code: error?.cause?.code || error?.code || error?.name
+            });
+        });
+    }
+
     async function createServer(cluster, deployment = cluster.initialDeployment) {
         const organizationId = cluster.manager.for;
         const organization = (await read('organizations', { _id: organizationId }, { _id: 1, bootstrapStorage: 1 }))[0];
@@ -231,6 +246,7 @@ export async function init(server) {
         }
     }
     // Methods stay out of persisted manager connection data and worker configuration.
+    Object.defineProperty(manager, 'startCluster', { value: startCluster });
     Object.defineProperty(manager, 'createServer', { value: createServer });
     Object.defineProperty(manager, 'terminateServer', { value: terminateServer });
     return manager;

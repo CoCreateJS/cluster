@@ -18,8 +18,12 @@ function createWorker(id, received) {
 }
 
 function isolateClusterListeners(t) {
+    const processPrevious = new Map(['message', 'orgConnected', 'orgDisconnected'].map(event => [event, process.listeners(event)]));
     const previous = new Map(['message', 'exit'].map(event => [event, cluster.listeners(event)]));
     t.after(() => {
+        for (const [event, listeners] of processPrevious) {
+            for (const listener of process.listeners(event)) if (!listeners.includes(listener)) process.removeListener(event, listener);
+        }
         for (const [event, listeners] of previous) {
             for (const listener of cluster.listeners(event)) {
                 if (!listeners.includes(listener)) cluster.removeListener(event, listener);
@@ -28,8 +32,9 @@ function isolateClusterListeners(t) {
     });
 }
 
+test.beforeEach(isolateClusterListeners);
+
 test('targeted shutdown reaches the remote mesh without shutting down the issuing primary', async t => {
-    isolateClusterListeners(t);
     const forwarded = [], events = [];
     const server = {
         id: 'issuing-server', cluster_id: 'cluster-1', isPrimary: true,
@@ -45,7 +50,6 @@ test('targeted shutdown reaches the remote mesh without shutting down the issuin
 });
 
 test('targeted shutdown executes on the target primary', async t => {
-    isolateClusterListeners(t);
     const events = [];
     const server = {
         id: 'target-server', cluster_id: 'cluster-1', isPrimary: true,
@@ -281,7 +285,6 @@ test('worker-originated server targets are forwarded into the mesh', () => {
 });
 
 test('organization messages route only to registered workers and exclude their origin', async t => {
-    isolateClusterListeners(t);
     const received = [];
     const meshMessages = [];
     const openedOrganizations = [];
@@ -297,19 +300,22 @@ test('organization messages route only to registered workers and exclude their o
         workers,
         mesh: {
             send: payload => meshMessages.push({ ...payload }),
-            openOrganization: organizationId => openedOrganizations.push(organizationId),
-            closeOrganization: organizationId => closedOrganizations.push(organizationId)
+            openOrganization: () => assert.fail('IPC must notify listeners, not call Mesh directly'),
+            closeOrganization: () => assert.fail('IPC must notify listeners, not call Mesh directly')
         },
-        emit: () => {}
+        emit: (event, payload) => {
+            if (event === 'orgConnected') openedOrganizations.push(payload.organization_id);
+            if (event === 'orgDisconnected') closedOrganizations.push(payload.organization_id);
+        }
     };
     IPC.init(server, new Map());
 
     cluster.emit('message', workers.get(1), {
-        method: 'registerOrg',
+        method: 'orgConnected',
         organization_id: 'organization-1'
     });
     cluster.emit('message', workers.get(2), {
-        method: 'registerOrg',
+        method: 'orgConnected',
         organization_id: 'organization-1'
     });
     cluster.emit('message', workers.get(1), {
@@ -336,14 +342,91 @@ test('organization messages route only to registered workers and exclude their o
     assert.equal(meshMessages.filter(item => item.uuid === 'organization-message').length, 1);
 
     cluster.emit('message', workers.get(1), {
-        method: 'deregisterOrg',
+        method: 'orgDisconnected',
         organization_id: 'organization-1'
     });
     assert.deepEqual(closedOrganizations, []);
 
     cluster.emit('message', workers.get(2), {
-        method: 'deregisterOrg',
+        method: 'orgDisconnected',
         organization_id: 'organization-1'
     });
     assert.deepEqual(closedOrganizations, ['organization-1']);
+    cluster.emit('message', workers.get(2), {
+        method: 'orgDisconnected', organization_id: 'organization-1'
+    });
+    assert.deepEqual(closedOrganizations, ['organization-1'], 'duplicate reports do not emit another transition');
+});
+
+
+test('last worker exit emits orgDisconnected locally even without Mesh installed', t => {
+    const events = [];
+    const server = { id: 'server-1', isPrimary: true, workers: new Map(),
+        emit: (event, payload) => events.push([event, payload]) };
+    const send = IPC.init(server, new Map());
+    send({ method: 'orgConnected', organization_id: 'tenant', workerId: 1 });
+    send({ method: 'orgConnected', organization_id: 'tenant', workerId: 2 });
+    assert.deepEqual(events, [['orgConnected', { organization_id: 'tenant' }]]);
+    events.length = 0;
+    cluster.emit('exit', { id: 1 });
+    assert.deepEqual(events, []);
+    cluster.emit('exit', { id: 2 });
+    assert.deepEqual(events, [['orgDisconnected', { organization_id: 'tenant' }]]);
+    assert.equal(server.organizationWorkers.has('tenant'), false);
+    cluster.emit('exit', { id: 2 });
+    assert.equal(events.length, 1);
+});
+
+
+test('connected reports emit once per organization until all worker registrations leave', t => {
+    const events = [];
+    const server = { id: 'node', isPrimary: true, workers: new Map(),
+        emit: (event, payload) => events.push([event, payload.organization_id]) };
+    const send = IPC.init(server, new Map());
+    for (const workerId of [1, 1, 2, 3]) send({ method: 'orgConnected', organization_id: 'tenant', workerId });
+    send({ method: 'orgConnected', organization_id: 'another', workerId: 1 });
+    assert.deepEqual(events, [['orgConnected', 'tenant'], ['orgConnected', 'another']]);
+    for (const workerId of [1, 2]) send({ method: 'orgDisconnected', organization_id: 'tenant', workerId });
+    assert.equal(events.length, 2);
+    send({ method: 'orgDisconnected', organization_id: 'tenant', workerId: 3 });
+    send({ method: 'orgConnected', organization_id: 'tenant', workerId: 2 });
+    assert.deepEqual(events.slice(2), [['orgDisconnected', 'tenant'], ['orgConnected', 'tenant']]);
+    assert.deepEqual([...server.organizationWorkers.get('another')], [1]);
+});
+
+
+test('worker IPC forwards local presence events once without reflecting server events', t => {
+    const sent = [];
+    const descriptors = new Map(['send', 'connected'].map(key => [key, Object.getOwnPropertyDescriptor(process, key)]));
+    t.after(() => {
+        for (const [key, descriptor] of descriptors) {
+            if (descriptor) Object.defineProperty(process, key, descriptor);
+            else delete process[key];
+        }
+    });
+    Object.defineProperty(process, 'send', { configurable: true, value: payload => sent.push(payload) });
+    Object.defineProperty(process, 'connected', { configurable: true, value: true });
+    const server = { isPrimary: false, isWorker: true, workerId: 3, emit() {} };
+    server.send = IPC.init(server, new Map());
+    process.emit('orgConnected', 'tenant', { workerId: 3 });
+    process.emit('orgDisconnected', 'tenant', { workerId: 3 });
+    assert.deepEqual(sent.map(({ method, organization_id, workerId }) => ({ method, organization_id, workerId })), [
+        { method: 'orgConnected', organization_id: 'tenant', workerId: 3 },
+        { method: 'orgDisconnected', organization_id: 'tenant', workerId: 3 }
+    ]);
+    assert.equal(sent.length, 2);
+});
+
+test('a primary serving clients aggregates local process events without sending or looping', t => {
+    const events = [];
+    const server = { isPrimary: true, isWorker: true, workerId: 1, workers: new Map(),
+        emit: (event, payload) => events.push([event, payload.organization_id]) };
+    server.send = () => assert.fail('Primary presence must aggregate directly');
+    IPC.init(server, new Map());
+    process.emit('orgConnected', 'tenant', { workerId: 1 });
+    process.emit('orgConnected', 'tenant', { workerId: 2 });
+    process.emit('orgDisconnected', 'tenant', { workerId: 1 });
+    assert.deepEqual(events, [['orgConnected', 'tenant']]);
+    process.emit('orgDisconnected', 'tenant', { workerId: 2 });
+    assert.deepEqual(events, [['orgConnected', 'tenant'], ['orgDisconnected', 'tenant']]);
 });

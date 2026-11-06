@@ -185,7 +185,7 @@ peer socket for each active organization, using `/<organization_id>` as the path
 Client Connect
         │
         ▼
-registerOrg
+orgConnected
         │
         ▼
 IPC Maps Organization → Workers
@@ -197,7 +197,7 @@ Client Disconnect
 60 Second Grace Timer
         │
         ▼
-deregisterOrg
+orgDisconnected
         │
         ▼
 Close Organization Mesh Sockets
@@ -207,8 +207,8 @@ Close Organization Mesh Sockets
 
 | Event | Description |
 | --- | --- |
-| `registerOrg` | Registers an organization as active on a worker. |
-| `deregisterOrg` | Removes an organization's worker mapping after all connections close. |
+| `orgConnected` | A worker reports its first local connection. IPC adds its worker mapping and emits the same event on the primary only when the organization gains its first worker. Mesh and AutoScaler listen independently. |
+| `orgDisconnected` | A worker reports its local departure. IPC removes that worker's organization mapping and emits the same event on the primary only when the final worker leaves. Mesh and AutoScaler listen independently. |
 
 The first local worker creates an empty entry in `mesh.organizations` and sends
 `orgRegistered` over every pathless control socket. A peer responds only when
@@ -216,9 +216,35 @@ the same organization exists in its own `mesh.organizations` map. The server
 with the higher `serverId` then creates one organization socket to the lower-ID
 server, preventing duplicate connections.
 
-When the final local worker deregisters, mesh closes that organization's
-connections and deletes its map entry. The remote server removes each socket
-through its normal `close` event; no organization-deletion broadcast is needed.
+Socket Server emits `orgConnected` and `orgDisconnected` on `process`, with
+`(organization_id, details)` arguments. It does not send presence reports
+through `server.send()` itself. IPC listens to those process events and owns
+the upward transport; when the primary also serves clients, IPC updates its
+worker map directly. The details include the reporting worker ID.
+
+IPC emits the corresponding event on the primary server emitter only when
+that organization's worker set changes between empty and nonempty. These
+server events carry `{ organization_id }`; they are separate from the process
+emitter and cannot be forwarded back into the worker-reporting path. Worker
+exits use the same last-worker transition logic.
+
+Mesh and AutoScaler independently listen to the primary events. On connection,
+Mesh opens the organization and discovers peers. On disconnection, Mesh closes
+organization sockets with code 1000 and removes its organization entry. Peers
+observe socket closure; no organization-removal message is sent. AutoScaler
+independently evaluates its configured scale-to-zero policy.
+
+All organizations follow the same worker cleanup rules, including the server's
+own organization. There are no resource-retention flags. Socket Server deletes
+its organization entry after the disconnect grace period, and local cleanup
+listeners clear organization-specific resources. CRUD bootstrap configuration
+and the bootstrap database worker remain independently available for requests
+that reactivate an organization.
+
+Local `orgConnected` fires after socket maps are populated. Additional sockets
+and reconnects within the grace period do not repeat it. Modules that initialize
+lazily from data continue doing so. Peer socket changes never manufacture a local
+worker disconnect: IPC remains the authority for local worker presence.
 
 Organization payloads retain their original envelope. IPC selects local workers;
 the mesh selects remote servers from its organization membership map.
@@ -229,14 +255,22 @@ the mesh selects remote servers from its organization membership map.
 
 Pathless `wss://ip` sockets form the server control and health channel and are
 stored separately. The platform becomes an active organization through the same
-`registerOrg` flow as every other organization and receives a distinct
+`orgConnected` flow as every other organization and receives a distinct
 `wss://ip/<platform_organization_id>` socket once both peers report active clients.
-When a socket closes unexpectedly because of a network failure, it is removed
-from the array and the outbound owner schedules reconnection. When mesh closes a
-socket intentionally, it marks the socket before calling `close()`, cancels any
-pending retry, and does not reconnect. The organization remains registered with
-an empty array until IPC sends `deregisterOrg` after its final local worker
-disconnects.
+An intentional socket close finalizes its references immediately. Unexpected
+outbound closure retries up to ten times with 5–7 second delays and a five-second
+handshake timeout. A closed socket is replaced on recovery; exhaustion finalizes
+its removal. The inbound side waits up to the corresponding two-minute recovery
+window for the outbound owner to reconnect, rather than starting another dialer.
+A reconnect cancels pending finalization. Local organization closure cancels its
+pending recovery and closes only its organization sockets, leaving pathless node
+control connections and the listening port available.
+
+Final socket cleanup removes its routing references. An empty organization entry
+is removed only when no local workers or pending peer recovery still require it.
+A remote departure alone cannot deactivate an organization with local clients.
+Node shutdown closes its control sockets separately; transport failures follow
+normal retry rules and do not by themselves prove persistent node deletion.
 
 ---
 

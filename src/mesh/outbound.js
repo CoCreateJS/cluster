@@ -28,6 +28,7 @@ export class ServerMeshOutbound {
         this.retryTimers = new Map();
         this.pruneTimers = new Map();
         this.peers = [];
+        this.reconnectWaitMs = 120000; // Ten attempts: up to 7s backoff plus a 5s handshake.
     }
 
     closeOrganization(organization_id) {
@@ -68,20 +69,25 @@ export class ServerMeshOutbound {
             });
         }
 
-        await this.getServers();
+        await this.getServers(this.server.organization_id);
     }
 
     /**
-     * Queries older running peers (READ ONLY) and triggers outbound connection setup.
+     * Discovers an organization's older running peers and connects them.
+     * An empty non-local organization notifies Manager to start its cluster.
      */
-    async getServers() {
-        if (!this.server?.crud) return;
+    async getServers(organization_id = this.server?.organization_id) {
+        if (!this.server?.crud || !organization_id) return;
+        const ownOrganization = organization_id === this.server.organization_id;
 
         const readPayload = {
             method: 'object.read',
             array: 'servers',
             filter: {
-                query: { _id: { $lt: this.server.id }, 'master.status': 'running' },
+                query: {
+                    _id: { $lt: this.server.id }, 'master.status': 'running',
+                    ...(!ownOrganization && { tenant_organization_id: organization_id })
+                },
                 sort: { _id: 1 },
                 limit: 0
             },
@@ -89,19 +95,21 @@ export class ServerMeshOutbound {
             host: this.server.host
         };
 
-        let readResult;
         try {
-            readResult = await this.server.crud.send(readPayload);
+            const readResult = await this.server.crud.send(readPayload);
+            if (!readResult || readResult.success === false ||
+                (Array.isArray(readResult.error) ? readResult.error.length : readResult.error) ||
+                !(Array.isArray(readResult) || Array.isArray(readResult.object) || Array.isArray(readResult.data))) {
+                throw new Error('Peer server inventory is unavailable.');
+            }
+            const peers = this.normalizePeersList(readResult);
+            if (ownOrganization) this.peers = peers;
+            if (!ownOrganization && !peers.length) this.server.manager.startCluster(organization_id);
+            for (const targetPeer of peers) {
+                this.connectPeer(targetPeer, peers.length, ownOrganization ? undefined : organization_id);
+            }
         } catch (err) {
-            console.error("[@cocreate/server-mesh/outbound] Failed to query peer server records:", err.message);
-            return;
-        }
-
-        const peers = this.normalizePeersList(readResult);
-        this.peers = peers;
-
-        for (const targetPeer of peers) {
-            this.connectPeer(targetPeer, peers.length);
+            console.error("[@cocreate/server-mesh/outbound] Failed to discover peers:", err.message);
         }
     }
 
@@ -131,6 +139,7 @@ export class ServerMeshOutbound {
                 ? `/${encodeURIComponent(organization_id)}`
                 : '';
             const targetUrl = `wss://${targetIp}:${this.meshPort}${path}`;
+            const previousSocket = this.mesh.activeConnections.get(connectionKey);
             const clientSocket = new this.WebSocket(targetUrl, [
                 encodeURIComponent(JSON.stringify({
                     type: 'peer',
@@ -141,7 +150,8 @@ export class ServerMeshOutbound {
                 }))
             ], {
                 servername: this.server.host,
-                rejectUnauthorized: false
+                rejectUnauthorized: false,
+                handshakeTimeout: 5000
             });
 
             clientSocket.isAlive = true;
@@ -155,6 +165,8 @@ export class ServerMeshOutbound {
             } else {
                 this.mesh.addOrganizationSocket(organization_id, clientSocket);
             }
+            if (previousSocket) this.mesh.removeSocketFromAllOrgServers(previousSocket);
+            this.retryTimers.delete(connectionKey);
             clientSocket.on('pong', () => { clientSocket.isAlive = true; });
             clientSocket.on('ping', () => { clientSocket.pong(); });
 
@@ -179,19 +191,15 @@ export class ServerMeshOutbound {
             });
 
             clientSocket.on('close', (code) => {
-                this.mesh.activeConnections.delete(connectionKey);
-                this.retryTimers.delete(connectionKey);
-                this.mesh.removeSocketFromAllOrgServers(clientSocket);
-
-                if (this.mesh.isClosed || clientSocket.intentionalClose || code === 1000) return;
-                if (organization_id && !this.mesh.organizations.has(organization_id)) return;
-
-                if (retryCount < maxRetries) {
-                    retryCount++;
-                    const delay = 5000 + Math.floor(Math.random() * 2000);
-                    const timerId = setTimeout(connectToPeer, delay);
-                    this.retryTimers.set(connectionKey, timerId);
+                if (this.mesh.isClosed || clientSocket.intentionalClose || code === 1000 ||
+                    (organization_id && !this.mesh.organizations.has(organization_id)) || retryCount >= maxRetries) {
+                    this.retryTimers.delete(connectionKey);
+                    this.mesh.removeSocketFromAllOrgServers(clientSocket);
+                    return;
                 }
+                retryCount++;
+                const delay = 5000 + Math.floor(Math.random() * 2000);
+                this.retryTimers.set(connectionKey, setTimeout(connectToPeer, delay));
             });
 
             clientSocket.on('message', (rawData) => {

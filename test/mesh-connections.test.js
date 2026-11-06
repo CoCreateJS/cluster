@@ -9,7 +9,7 @@ function setup(t) {
     const sockets = [];
     class Socket extends EventEmitter {
         constructor(url) { super(); this.url = url; this.readyState = 1; sockets.push(this); }
-        close(code) { this.emit('close', code); }
+        close(code) { this.readyState = 3; this.emit('close', code); }
     }
     const mesh = new ServerMesh();
     mesh.server = { isPrimary: true, id: 'server-z', ip: '192.0.2.10', organization_id: 'platform', host: 'platform.test' };
@@ -87,4 +87,62 @@ test('standard close codes reach a real WebSocket peer', { timeout: 5000 }, asyn
             await new Promise(resolve => listener.close(resolve));
         }
     }
+});
+
+
+test('organization recovery retries are bounded and exhaustion clears peer-only presence', t => {
+    const { mesh, outbound, sockets } = setup(t);
+    mesh.organizations.set('tenant', []);
+    outbound.connectPeer({ _id: 'peer', ip: '192.0.2.1' }, 1, 'tenant');
+    for (let attempt = 0; attempt < 10; attempt++) {
+        sockets.at(-1).close(1006);
+        assert.equal(mesh.organizations.has('tenant'), true);
+        assert.equal(outbound.retryTimers.size, 1);
+        t.mock.timers.tick(7000);
+        assert.equal(mesh.organizations.get('tenant').length, 1, 'retry replaces the previous socket reference');
+    }
+    assert.equal(sockets.length, 11);
+    sockets.at(-1).close(1006);
+    t.mock.timers.tick(100000);
+    assert.equal(sockets.length, 11);
+    assert.equal(outbound.retryTimers.size, 0);
+    assert.equal(mesh.activeConnections.size, 0);
+    assert.equal(mesh.organizations.has('tenant'), false);
+});
+
+test('a recovered organization socket replaces its failed reference and intentional closure finalizes it', t => {
+    const { mesh, outbound, sockets } = setup(t);
+    mesh.organizations.set('tenant', []);
+    outbound.connectPeer({ _id: 'peer', ip: '192.0.2.1' }, 1, 'tenant');
+    sockets[0].close(1006);
+    t.mock.timers.tick(7000);
+    sockets[1].emit('open');
+    assert.deepEqual(mesh.organizations.get('tenant'), [sockets[1]]);
+    assert.equal(outbound.retryTimers.size, 0);
+    sockets[1].close(1000);
+    assert.equal(mesh.organizations.has('tenant'), false);
+    t.mock.timers.tick(100000);
+    assert.equal(sockets.length, 2);
+});
+
+test('the last remote socket closing preserves an organization still used by local workers', t => {
+    const { mesh, outbound, sockets } = setup(t);
+    mesh.server.organizationWorkers = new Map([['tenant', new Set([1])]]);
+    mesh.organizations.set('tenant', []);
+    outbound.connectPeer({ _id: 'peer', ip: '192.0.2.1' }, 1, 'tenant');
+    sockets[0].close(1000);
+    assert.deepEqual(mesh.organizations.get('tenant'), []);
+    assert.equal(mesh.server.organizationWorkers.get('tenant').size, 1);
+});
+
+test('own-organization messaging can close while node control connectivity remains', t => {
+    const { mesh, outbound, sockets } = setup(t);
+    mesh.organizations.set('platform', []);
+    outbound.connectPeer({ _id: 'peer', ip: '192.0.2.1' });
+    outbound.connectPeer({ _id: 'peer', ip: '192.0.2.1' }, 1, 'platform');
+    mesh.closeOrganization('platform');
+    assert.equal(mesh.organizations.has('platform'), false);
+    assert.deepEqual(mesh.controlSockets, [sockets[0]]);
+    assert.equal(mesh.activeConnections.get('control:peer'), sockets[0]);
+    assert.equal(sockets[1].readyState, 3);
 });
