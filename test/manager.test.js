@@ -47,7 +47,7 @@ async function setupState(t, { primary = true, failedMirror = false } = {}) {
     const writes = [], mirrors = [], order = [];
     const server = {
         id: 'server-1', organization_id: 'tenant', host: 'tenant.test', isPrimary: primary,
-        workerId: primary ? null : 2, totalWorkers: 2, on() {}, workers: new Map(),
+        workerId: primary ? null : 2, isWorker: !primary, on() {}, workers: new Map(),
         manager: { organization_id: 'parent', send: async request => {
             order.push('mirror'); mirrors.push(structuredClone(request));
             if (failedMirror) throw new Error('offline');

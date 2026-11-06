@@ -31,7 +31,7 @@ async function setup(t, { minimum = 0, enabled = true, workers = 1, telemetry = 
     const calls = [];
     const server = Object.assign(new EventEmitter(), {
         id: 'node', organization_id: 'tenant', host: 'tenant.test', cluster_id: 'cluster',
-        isPrimary: true, totalWorkers: 1, workers: new Map(),
+        isPrimary: true, isWorker: true, workers: new Map(),
         api: { send: async request => { calls.push(['terminate', request]); return { success: true }; } },
         state: {
             drain: async value => calls.push(['drain', value]),

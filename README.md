@@ -291,10 +291,48 @@ Every server instance extends Node.js `EventEmitter`.
 | `id` | Unique server identifier |
 | `isPrimary` | Indicates Primary process |
 | `workerId` | Worker identifier |
-| `totalWorkers` | Number of workers |
+| `workers.size` | Live tracked child-process count |
+| `workers` | ID-keyed `Workers` Map with local lifecycle methods |
 | `state` | Current server state |
 | `storage` / `store` | Reactive cluster storage |
 | `send()` | Server-side IPC and mesh message dispatcher |
+
+### Local worker collection
+
+`server.workers` is a `Workers extends Map` instance from `src/workers.js`.
+Native reads (`get`, `has`, `values`, iteration, and `size`) expose tracked
+processes. Each record retains `{ id, pid, process, isListening }` plus metadata.
+
+| Operation | Behavior | Return |
+| --- | --- | --- |
+| `add(options)` | Creates a process, assigns an unused ID, and tracks it | The tracked record, including its ID |
+| `get(id)` | Looks up a tracked worker | Record or `undefined` |
+| `set(id, updates)` | Updates an existing record in place; ignores identity and readiness fields | Nothing |
+| `delete(id)` | Requests graceful shutdown and suppresses respawn; removes the record on exit | Nothing |
+| `clear()` | Requests deletion of all workers and cancels pending replacements | Nothing |
+
+`add` options are environment variables, matching Node's `cluster.fork(env)`.
+Required runtime identity/bootstrap variables are supplied by the manager and
+cannot be overridden. The returned record describes a created process;
+readiness is reported later. `set` cannot create a process or modify `id`, `pid`,
+`process`, or `isListening`. Deletion retains tracking until the process exits,
+so collection state cannot silently abandon a running process. Unexpected exits
+retain the existing two-second replacement and readiness flow, including custom
+environment variables. Explicit deletion also cancels pending replacement.
+
+Startup configuration is private to the manager. `configureWorkers(value)`
+resolves that configuration and `setupMasterCluster()` creates the initial
+processes. No runtime `server.totalWorkers` counter is maintained. Live counts
+come from `server.workers.size`; process mode is tracked separately so losing
+children does not turn a dedicated primary into a client-serving worker. Worker
+processes have no child entries of their own; their empty collections report zero.
+The existing persisted/telemetry `totalWorkers` field derives from the live Map,
+rather than acting as another runtime counter.
+
+`server.send()` continues using IPC. Mesh remains at `server.mesh`; this change
+does not rename network or client messaging. The existing `server.cluster`
+reference, `ClusterManager` named export, and manager `.workers` view remain
+compatibility references to the same collection, with no second worker registry.
 
 ### Status Events
 

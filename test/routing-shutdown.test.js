@@ -21,7 +21,7 @@ async function setup(t, remove) {
     t.mock.method(Http, 'createServer', () => ({ listen() {}, close() {} }));
     const { default: State, triggerGlobalShutdown } = await import(`../src/state.js?test=${++moduleId}`);
     const server = {
-        id: 'server-1', isPrimary: true, totalWorkers: 1, organization_id: 'platform', host: 'platform.test',
+        id: 'server-1', isPrimary: true, isWorker: true, organization_id: 'platform', host: 'platform.test',
         on() {}, workers: new Map(),
         routing: { remove: async reason => {
             order.push(`remove:${reason}`);
@@ -103,7 +103,7 @@ test('a failed routing workflow is reported and does not prevent existing shutdo
 
 test('master shutdown does not run worker service handlers', async t => {
     const { server, triggerGlobalShutdown } = await setup(t);
-    server.totalWorkers = 2;
+    server.isWorker = false;
     let called = false;
     server.shutdownHandlers = new Set([() => { called = true; }]);
     await triggerGlobalShutdown('SIGTERM', () => {});
@@ -112,7 +112,7 @@ test('master shutdown does not run worker service handlers', async t => {
 
 test('master checkpoints once after all workers exit and finalization is shared', async t => {
     const { server, triggerGlobalShutdown, order } = await setup(t);
-    server.totalWorkers = 2;
+    server.isWorker = false;
     server.workers.set(1, {});
     let finish;
     server.repository = { stop: async (reason, options) => {

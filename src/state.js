@@ -224,7 +224,7 @@ export async function save(overrideStatus) {
             ip: server.ip,
             host: server.host,
             status: (server.state?.status || 'RUNNING').toLowerCase(), // OS level status: 'running', 'rebooting', 'stopped'
-            totalWorkers: server.totalWorkers,
+            totalWorkers: server.workers.size,
             infrastructure: server.infrastructure,
             location: server.location,
             master: isPrimaryStopped ? {
@@ -237,7 +237,7 @@ export async function save(overrideStatus) {
         };
 
         // If running in single-process mode, also record worker1 state in DB
-        if (server.totalWorkers <= 1) {
+        if (server.isWorker) {
             payloadData.worker1 = isPrimaryStopped ? {
                 pid: null,
                 status: 'stopped',
@@ -578,7 +578,7 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
                 server.state.primaryShutdownTimeout = null;
             }
             // In single-process mode consumers such as AI live on the primary.
-            if (server.totalWorkers <= 1) await runShutdownHandlers(reason);
+            if (server.isWorker) await runShutdownHandlers(reason);
             const remaining = shutdownDeadline - Date.now();
             if (remaining > 0) {
                 try { await server.repository?.stop(reason, { timeoutMs: remaining }); }
