@@ -71,8 +71,8 @@ export class Workers extends Map {
     configureWorkers(configuredWorkers) {
         if (configuredWorkers !== false && configuredWorkers !== 'false') {
             const parsedWorkers = parseInt(configuredWorkers, 10);
-            if (parsedWorkers === -1) {
-                this.#config.workers = Math.max(1, os.cpus().length - 1);
+            if (parsedWorkers < 0) {
+                this.#config.workers = Math.max(1, os.cpus().length + parsedWorkers);
             } else {
                 this.#config.workers = parsedWorkers || os.cpus().length;
             }

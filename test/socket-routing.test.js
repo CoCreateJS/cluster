@@ -67,6 +67,11 @@ test('a real socket response uses server.send once and fans out without socket f
     assert.equal(peers.length, 1);
     assert.equal(workers.length, 1);
     assert.equal(peers[0].uuid, response.uuid);
+    assert.equal(response.serverId, 'node');
+    assert.equal(response.workerId, 1);
+    assert.equal(response.clusterId, 'cluster');
+    assert.equal(workers[0].clusterId, 'cluster');
+    assert.equal(peers[0].clusterId, 'cluster');
     assert.equal(workers[0].uuid, response.uuid);
     assert.equal('socket' in peers[0], false);
     assert.equal('socket' in workers[0], false);

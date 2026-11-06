@@ -22,6 +22,7 @@ import { uuid } from '@cocreate/utils';
 const presenceEvents = ['orgConnected', 'orgDisconnected'];
 const masterControls = ['restart', 'reboot', 'shutdown'];
 const workerControls = ['cordon', 'shed', 'drain'];
+const missingId = value => value == null || value === '';
 const includesTarget = (target, id) => target === undefined ||
     (Array.isArray(target) ? target : [target]).some(value => String(value) === String(id));
 const organizationDelivery = payload => Boolean(payload.organization_id &&
@@ -126,8 +127,6 @@ export function init(server, pendingPromises) {
             return;
         }
         payload.uuid ||= uuid();
-        payload.workerId ??= worker?.id;
-        payload.serverId ??= server.id;
         if (payload.broadcast === 'false') payload.broadcast = false;
         let result;
         try {
@@ -168,10 +167,14 @@ export function init(server, pendingPromises) {
         payload.uuid ||= uuid();
         payload.organization_id ||= payload.socket?.organization_id;
         if (payload.broadcast === 'false') payload.broadcast = false;
-        if (payload.serverId === undefined && payload.workerId === undefined && (!server.isPrimary || server.isWorker)) {
-            payload.workerId = server.workerId;
+        const origin = Object.entries({ serverId: server.id, workerId: server.workerId, clusterId: server.cluster_id });
+        const originatedHere = missingId(payload.serverId) || (payload.serverId === server.id &&
+            (payload.workerId ?? null) === (server.workerId ?? null));
+        if (originatedHere && origin.every(([field, id]) => missingId(payload[field]) || payload[field] === id)) {
+            for (const [field, id] of origin) {
+                if (missingId(payload[field]) && !missingId(id)) payload[field] = id;
+            }
         }
-        payload.serverId ??= server.id;
         payload.status ||= 'sent';
         if (payload.response === true) {
             if (server.isPrimary) {

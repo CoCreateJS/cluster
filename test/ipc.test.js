@@ -167,7 +167,7 @@ test('forwarded broadcasts await all workers and ignore broadcastSender', async 
     initIPC(server, pendingPromises);
 
     cluster.emit('message', workers.get(1), {
-        uuid: 'existing-uuid',
+        uuid: 'existing-uuid', serverId: 'server-1', workerId: 1,
         method: 'example.changed',
         broadcast: true,
         broadcastSender: false,
@@ -289,7 +289,7 @@ test('worker-originated server targets are forwarded into the mesh', () => {
     initIPC(server, new Map());
 
     cluster.emit('message', sourceWorker, {
-        uuid: 'worker-originated-uuid',
+        uuid: 'worker-originated-uuid', serverId: 'server-1', workerId: 1,
         method: 'configuration.refresh',
         server: 'server-2',
         master: false,
@@ -329,15 +329,15 @@ test('organization messages route only to registered workers and exclude their o
     initIPC(server, new Map());
 
     cluster.emit('message', workers.get(1), {
-        method: 'orgConnected',
+        method: 'orgConnected', workerId: 1,
         organization_id: 'organization-1'
     });
     cluster.emit('message', workers.get(2), {
-        method: 'orgConnected',
+        method: 'orgConnected', workerId: 2,
         organization_id: 'organization-1'
     });
     cluster.emit('message', workers.get(1), {
-        uuid: 'organization-message',
+        uuid: 'organization-message', serverId: 'server-1', workerId: 1,
         method: 'crud',
         organization_id: 'organization-1',
         broadcast: true
@@ -360,13 +360,13 @@ test('organization messages route only to registered workers and exclude their o
     assert.equal(meshMessages.filter(item => item.uuid === 'organization-message').length, 1);
 
     cluster.emit('message', workers.get(1), {
-        method: 'orgDisconnected',
+        method: 'orgDisconnected', workerId: 1,
         organization_id: 'organization-1'
     });
     assert.deepEqual(closedOrganizations, []);
 
     cluster.emit('message', workers.get(2), {
-        method: 'orgDisconnected',
+        method: 'orgDisconnected', workerId: 2,
         organization_id: 'organization-1'
     });
     assert.deepEqual(closedOrganizations, ['organization-1']);
@@ -622,4 +622,69 @@ test('request correlation uses native worker IDs while presence uses the logical
     await failed;
     assert.equal(pending.size, 0);
     assert.equal(server.organizationWorkers.has('org'), false);
+});
+
+test('a local send fills empty origin fields without changing destination fields', async () => {
+    const forwarded = [];
+    const server = { id: 'node', workerId: 1, cluster_id: 'origin-cluster', isPrimary: true, isWorker: true,
+        workers: new Map(), cluster: { send: payload => forwarded.push(payload) }, emit() {} };
+    const payload = { method: 'object.read', organization_id: 'org', uuid: 'existing-uuid',
+        serverId: '', workerId: null, clusterId: '',
+        server: 'destination-node', cluster: 'destination-cluster', worker: 2 };
+    await initIPC(server, new Map())(payload);
+    assert.equal(payload.uuid, 'existing-uuid');
+    assert.equal(payload.serverId, 'node');
+    assert.equal(payload.workerId, 1);
+    assert.equal(payload.clusterId, 'origin-cluster');
+    assert.equal(forwarded[0].clusterId, 'origin-cluster');
+    assert.equal(payload.server, 'destination-node');
+    assert.equal(payload.cluster, 'destination-cluster');
+    assert.equal(payload.worker, 2);
+});
+
+test('unknown cluster context stays absent and a known local origin can fill its own missing fields', async () => {
+    const server = { id: 'node', workerId: 1, isPrimary: true, workers: new Map(), emit() {} };
+    const send = initIPC(server, new Map());
+    const initial = await send({ method: 'example.local', serverId: 'node', workerId: 1 });
+    assert.equal(initial.workerId, 1);
+    assert.equal('clusterId' in initial, false);
+    server.cluster_id = 'known-cluster';
+    const existing = await send({ method: 'example.local', serverId: 'node', workerId: 1, clusterId: 'known-cluster' });
+    assert.equal(existing.serverId, 'node');
+    assert.equal(existing.workerId, 1);
+    assert.equal(existing.clusterId, 'known-cluster');
+});
+
+for (const origin of [
+    { serverId: 'remote-node', workerId: 4, clusterId: 'remote-cluster' },
+    { serverId: 'remote-node' },
+    { serverId: 'node', workerId: 4 },
+    { serverId: 'node' },
+    { serverId: 'node', clusterId: 'local-cluster' },
+    { clusterId: 'remote-cluster' },
+    { serverId: 'node', workerId: 0 }
+]) {
+    test(`relayed origin remains unchanged: ${JSON.stringify(origin)}`, async () => {
+        const server = { id: 'node', workerId: 1, cluster_id: 'local-cluster', isPrimary: true,
+            workers: new Map(), emit() {} };
+        const payload = { method: 'object.read', organization_id: 'org', ...origin };
+        await initIPC(server, new Map())(payload);
+        for (const field of ['serverId', 'workerId', 'clusterId']) {
+            assert.equal(payload[field], origin[field]);
+            assert.equal(field in payload, field in origin);
+        }
+    });
+}
+
+test('receiving IPC traffic does not stamp the receiving node or worker as its origin', async () => {
+    const server = { id: 'relay-node', workerId: 1, cluster_id: 'relay-cluster', isPrimary: true,
+        workers: new Map(), emit() {} };
+    initIPC(server, new Map());
+    const source = createWorker(7, []);
+    const receive = cluster.listeners('message').at(-1);
+    await receive(source, { method: 'object.read', organization_id: 'org', uuid: 'relayed', serverId: 'original-node' });
+    const reply = source.responses[0];
+    assert.equal(reply.serverId, 'original-node');
+    assert.equal('workerId' in reply, false);
+    assert.equal('clusterId' in reply, false);
 });

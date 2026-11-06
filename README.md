@@ -322,7 +322,9 @@ environment variables. Explicit deletion also cancels pending replacement.
 
 Startup configuration is private to the manager. `configureWorkers(value)`
 resolves that configuration and `setupMasterCluster()` creates the initial
-processes. No runtime `server.totalWorkers` counter is maintained. Live counts
+processes. `0` uses the CPU count; negative values subtract from it (`-1` reserves
+one core, `-2` reserves two), with a minimum of one worker. A resolved count of one
+runs the primary and worker roles in the same process without forking. No runtime `server.totalWorkers` counter is maintained. Live counts
 come from `server.workers.size`; process mode is tracked separately so losing
 children does not turn a dedicated primary into a client-serving worker. Worker
 processes have no child entries of their own; their empty collections report zero.
@@ -356,8 +358,14 @@ targeted workers and return one envelope; they do not return a results array.
 Application errors from another process are returned in its envelope; transport
 failures reject. This does not promise application processing or delivery
 acknowledgement from every remote network client.
-Origin `serverId` and `workerId` metadata prevents duplicate delivery; Socket
-Server no longer needs a forwarding-loop flag.
+`server.send()` is the origin-stamping boundary. For new local messages it fills
+missing `serverId`, `workerId`, and available `clusterId` from the server context.
+Existing values are never overwritten. An origin identifying another server,
+worker, or cluster is relayed unchanged, including any missing fields. IPC
+receive and direct Socket/Mesh send do not fill origin IDs; direct transport
+callers own that metadata. Destination `server`, `worker`, and `cluster` fields
+remain separate from origin IDs. Socket Server no longer needs a forwarding-loop
+flag.
 
 ### Status Events
 

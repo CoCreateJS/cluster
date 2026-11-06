@@ -366,10 +366,6 @@ export class ServerMesh extends EventEmitter {
         if (!payload.uuid) {
             payload.uuid = crypto.randomUUID();
         }
-        if (payload.serverId === undefined) {
-            payload.serverId = this.server?.id;
-            payload.status = 'sent';
-        }
 
         const isPrimary = this.server?.isPrimary ?? true;
 

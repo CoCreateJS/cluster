@@ -279,3 +279,14 @@ test('awaited event dispatch returns the envelope and respects once listeners', 
     assert.equal(await server.emitAsync(payload.method, payload), payload);
     assert.equal(calls, 1);
 });
+
+for (const [configured, expected] of [[-1, 7], [-2, 6], ['-2', 6], [-20, 1]]) {
+    test(`worker configuration ${configured} on eight CPUs resolves to ${expected}`, async t => {
+        t.mock.method(os, 'cpus', () => Array.from({ length: 8 }, () => ({})));
+        const { workers, server, forks } = setup(t, configured);
+        assert.equal(server.isWorker, expected === 1);
+        assert.equal(await workers.setupMasterCluster(), expected > 1);
+        assert.equal(forks.length, expected === 1 ? 0 : expected);
+        assert.equal(workers.size, forks.length);
+    });
+}

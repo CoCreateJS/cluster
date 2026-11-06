@@ -26,7 +26,7 @@ test('real workers reply consistently with async results, errors and ignored ret
         import IPC from ${JSON.stringify(new URL('../src/ipc.js', import.meta.url).href)};
         import Storage from ${JSON.stringify(new URL('../src/storage.js', import.meta.url).href)};
         const server = new EventEmitter();
-        Object.assign(server, { id: 'node', isPrimary: false, isWorker: true, workerId: cluster.worker.id });
+        Object.assign(server, { id: 'node', cluster_id: 'origin-cluster', isPrimary: false, isWorker: true, workerId: cluster.worker.id });
         ${eventAPI}
         const pending = new Map();
         server.send = IPC.init(server, pending);
@@ -64,7 +64,7 @@ test('real workers reply consistently with async results, errors and ignored ret
     });
     await Promise.all(children.map(worker => once(worker, 'message')));
     const server = new EventEmitter();
-    Object.assign(server, { id: 'node', isPrimary: true, workers: new Map(children.map(worker => [worker.id, worker])),
+    Object.assign(server, { id: 'node', cluster_id: 'origin-cluster', isPrimary: true, workers: new Map(children.map(worker => [worker.id, worker])),
         cluster: { send() { assert.fail('This test only uses IPC'); } } });
     const pending = new Map();
     server.emitAsync = async (event, payload) => {
@@ -77,6 +77,9 @@ test('real workers reply consistently with async results, errors and ignored ret
         const response = await server.send({ method: 'example.work', master: false,
             worker: children[0].id, value: 21, broadcastSender });
         assert.equal(response.result, 42);
+        assert.equal(response.serverId, 'node');
+        assert.equal(response.clusterId, 'origin-cluster');
+        assert.equal(response.workerId, undefined, 'The receiving worker is not the request origin');
         assert.equal(response.response, true);
         assert.equal(typeof response.uuid, 'string');
         assert.equal(pending.size, 0);

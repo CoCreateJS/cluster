@@ -163,5 +163,19 @@ test('worker Mesh attaches as server.cluster and forwards direct sends through p
     assert.equal(forwarded.length, 1);
     assert.equal(forwarded[0].method, 'mesh.outbound_mesh_relay');
     assert.equal(forwarded[0].payload, payload);
-    assert.equal(payload.serverId, 'worker-node');
+    assert.equal(payload.serverId, undefined, 'Direct transport does not establish an origin');
+});
+
+test('direct Mesh send preserves the envelope without adding local origin IDs', () => {
+    const mesh = new ServerMesh();
+    mesh.server = { id: 'relay-node', workerId: 2, cluster_id: 'relay-cluster', isPrimary: true };
+    const sent = [];
+    mesh.controlSockets = [{ readyState: 1, send: data => sent.push(JSON.parse(data)) }];
+    const payload = { method: 'example.event', uuid: 'existing-uuid' };
+    mesh.send(payload);
+    for (const field of ['serverId', 'workerId', 'clusterId']) {
+        assert.equal(field in payload, false);
+        assert.equal(field in sent[0], false);
+    }
+    assert.equal(sent[0].uuid, 'existing-uuid');
 });
