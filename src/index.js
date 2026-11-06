@@ -28,7 +28,7 @@ import Config from '@cocreate/config';
 import authenticate from '@cocreate/authenticate';
 import authorize from '@cocreate/authorize';
 
-import SocketServer from '@cocreate/socket-server';
+import { SocketServer as SocketServer } from '@cocreate/socket';
 import CrudServer from '@cocreate/crud-server';
 import FileServer from '@cocreate/file/server';
 import ApiServer from '@cocreate/api';
@@ -284,6 +284,7 @@ export class CoCreateServer {
             });
 
             this.wsManager = new SocketServer(this);
+            this.socket = this.wsManager.collection;
             this.wsManager.on('api', this.api.send);
             this.wsManager.on('workflow', this.workflow.run);
             this.files = await FileServer.init(this);

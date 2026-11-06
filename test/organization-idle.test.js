@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import { setImmediate } from 'node:timers/promises';
 import config from '@cocreate/config';
 import { init as initAutoscaler } from '../../autoscaler/src/index.js';
-import { SocketServer } from '../../socket-server/src/index.js';
+import { SocketServer } from '../../socket/src/index.js';
 import IPC from '../src/ipc.js';
 import { ServerMesh } from '../src/mesh/index.js';
 

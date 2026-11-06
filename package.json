@@ -54,11 +54,11 @@
     "@cocreate/autoscaler": "^2.0.0",
     "@cocreate/telemetry": "^2.0.0",
     "@cocreate/tls": "^2.0.0",
-    "@cocreate/socket-server": "^2.0.0",
     "@cocreate/usage": "^2.0.0",
     "@cocreate/utils": "^2.0.0",
     "@cocreate/workflows": "^1.0.0",
     "@cocreate/api": "^2.0.0",
-    "ws": "^8.21.0"
+    "ws": "^8.21.0",
+    "@cocreate/socket": "^2.0.1"
   }
 }
