@@ -33,7 +33,7 @@ const organizationDelivery = payload => Boolean(payload.organization_id &&
 export function init(server, pendingPromises) {
     const organizationWorkers = server.organizationWorkers ||= new Map();
 
-    function transportEnvelope({ socket, wsManager, ...payload }) { return payload; }
+    function transportEnvelope({ wsManager, ...payload }) { return payload; }
 
     function request(send, payload, key, workerId) {
         return new Promise((resolve, reject) => {
@@ -165,7 +165,6 @@ export function init(server, pendingPromises) {
 
     return function send(payload = {}) {
         payload.uuid ||= uuid();
-        payload.organization_id ||= payload.socket?.organization_id;
         if (payload.broadcast === 'false') payload.broadcast = false;
         const origin = Object.entries({ serverId: server.id, workerId: server.workerId, clusterId: server.cluster_id });
         const originatedHere = missingId(payload.serverId) || (payload.serverId === server.id &&

@@ -249,6 +249,7 @@ test('API HTTP entrance executes the real API pipeline with sanitized input', as
     const order = [];
     const server = {
         organization_id: 'platform',
+        send: async envelope => envelope,
         authorize: { ...Authorize, check: async envelope => {
             order.push('authorize');
             assert.equal(envelope.apikey, 'transport-key');
@@ -275,6 +276,7 @@ test('API HTTP entrance executes the real API pipeline with sanitized input', as
 test('workflow HTTP entrance executes the real workflow AST after authorizing', async () => {
     const order = [];
     const server = {
+        send: async envelope => envelope,
         authorize: { ...Authorize, check: async envelope => {
             order.push('authorize');
             assert.equal(envelope.apikey, 'transport-key');

@@ -463,15 +463,15 @@ test('send starts local, worker and cluster delivery independently and awaits lo
         cluster: { send: data => forwarded.push(data) }, emit() {}
     };
     server.send = initIPC(server, pending);
-    const socket = {}; socket.self = socket;
+    const socket = { purpose: 'ordinary payload' };
     const payload = { method: 'object.read', organization_id: 'org', clientId: 'client', socket,
         broadcastSender: true };
     let complete = false;
     const result = server.send(payload).then(value => { complete = true; return value; });
     assert.equal(forwarded.length, 1);
     assert.deepEqual(received.map(item => item.id), [2]);
-    assert.equal('socket' in forwarded[0], false);
-    assert.equal('socket' in received[0].payload, false);
+    assert.equal(forwarded[0].socket, socket);
+    assert.equal(received[0].payload.socket, socket);
     assert.doesNotThrow(() => JSON.stringify(forwarded[0]));
     assert.equal(pending.size, 1, 'The worker receipt uses the same correlation path as other requests');
     await Promise.resolve();
@@ -538,13 +538,13 @@ test('a worker sends locally and upstream once; receiving another worker deliver
     const server = { id: 'node', isPrimary: false, workerId: 1,
         socket: { send: data => local.push(data) }, emit: (...args) => events.push(args) };
     server.send = initIPC(server, pending);
-    const socket = {}; socket.self = socket;
+    const socket = { purpose: 'ordinary payload' };
     await server.send({ method: 'object.read', organization_id: 'org', socket, broadcastSender: true });
     assert.equal(local.length, 1);
     assert.equal(upstream.length, 1);
     assert.equal(upstream[0].serverId, 'node');
     assert.equal(upstream[0].workerId, 1);
-    assert.equal('socket' in upstream[0], false);
+    assert.equal(upstream[0].socket, socket);
     assert.equal(pending.size, 0);
     const receive = process.listeners('message').find(listener => !previous.has(listener));
     await receive({ method: 'object.read', organization_id: 'org', serverId: 'remote', workerId: 2 });
@@ -555,16 +555,16 @@ test('a worker sends locally and upstream once; receiving another worker deliver
     assert.equal(events.length, 0);
 });
 
-test('an attached socket supplies missing organization scope before routing', async () => {
+test('a socket payload field cannot supply organization scope for routing', async () => {
     const local = [], forwarded = [];
     const server = { id: 'node', isPrimary: true, workers: new Map(),
         socket: { send: data => local.push(data) }, cluster: { send: data => forwarded.push(data) }, emit() {} };
     const payload = { method: 'workflow.complete', socket: { organization_id: 'org' }, broadcastSender: true };
     const pending = new Map();
     await initIPC(server, pending)(payload);
-    assert.equal(payload.organization_id, 'org');
-    assert.equal(local.length, 1);
-    assert.equal(forwarded.length, 1);
+    assert.equal(payload.organization_id, undefined);
+    assert.equal(local.length, 0);
+    assert.equal(forwarded.length, 0);
     assert.equal(pending.size, 0);
 });
 
