@@ -48,7 +48,7 @@
     "@cocreate/authorize": "^2.0.0",
     "@cocreate/config": "^2.0.0",
     "@cocreate/cron": "^2.0.0",
-    "@cocreate/crud-server": "^2.0.0",
+    "@cocreate/crud": "^2.0.0",
     "@cocreate/file": "^2.0.0",
     "@cocreate/lazy-loader": "^2.0.0",
     "@cocreate/autoscaler": "^2.0.0",

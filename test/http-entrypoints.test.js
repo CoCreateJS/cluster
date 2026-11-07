@@ -131,9 +131,9 @@ test('an API key can be supplied in the existing JSON envelope', async () => {
 });
 
 test('existing authorization rules grant only the configured workflow method', async t => {
-    const { default: crud } = await import('@cocreate/crud-server');
+    const { crudServer } = await import('@cocreate/crud');
     const { default: authorize } = await import('@cocreate/authorize');
-    t.mock.method(crud, 'send', async query => {
+    t.mock.method(crudServer, 'send', async query => {
         assert.equal(query.array, 'keys');
         return { object: [{ key: 'cluster-key', methods: { 'workflow.scale': true } }] };
     });
@@ -145,12 +145,12 @@ test('existing authorization rules grant only the configured workflow method', a
 });
 
 test('real HTTP requests fail without grants and succeed with the configured API key', async t => {
-    const { default: crud } = await import('@cocreate/crud-server');
+    const { crudServer } = await import('@cocreate/crud');
     const { default: authorize } = await import('@cocreate/authorize');
     // In-memory authorization records only; no writes to a running CoCreate database.
     const defaultKey = { default: true, 'methods.signIn': true, 'methods.signUp': true };
     const clusterKey = { key: 'http-test-cluster-key', methods: { post: true, 'workflow.scale': true } };
-    t.mock.method(crud, 'send', async query => {
+    t.mock.method(crudServer, 'send', async query => {
         assert.equal(query.array, 'keys');
         const suppliedKey = query.filter.query.$or.find(item => item.key)?.key;
         return { object: [defaultKey, ...(suppliedKey === clusterKey.key ? [clusterKey] : [])] };

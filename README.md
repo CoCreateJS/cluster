@@ -98,7 +98,7 @@ The server composes multiple standalone CoCreate modules into a unified runtime.
 | `@cocreate/certificates` | TLS certificate management |
 | `@cocreate/socket` | WebSocket server |
 | `cluster/src/mesh` | Inter-server communication |
-| `@cocreate/crud-server` | Database routing |
+| `@cocreate/crud` | Database routing |
 | `@cocreate/autoscaler` | Automatic scaling |
 | `@cocreate/telemetry` | Monitoring and metrics |
 | `@cocreate/api` | Dynamic API execution |

@@ -29,7 +29,7 @@ import authenticate from '@cocreate/authenticate';
 import authorize from '@cocreate/authorize';
 
 import { SocketServer } from '@cocreate/socket';
-import CrudServer from '@cocreate/crud-server';
+import { crudServer } from '@cocreate/crud';
 import FileServer from '@cocreate/file/server';
 import ApiServer from '@cocreate/api';
 import Workflow from '@cocreate/workflows';
@@ -155,7 +155,7 @@ export class CoCreateServer {
         // Configure the local worker collection
         this.workers.configureWorkers(config.workers);
 
-        this.crud = await CrudServer.init(this);
+        this.crud = await crudServer.init(this);
         try {
             await ApiKey.init(this);
         } catch {
