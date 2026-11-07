@@ -1,3 +1,24 @@
+# [3.0.0](https://github.com/CoCreateJS/cluster/compare/v2.1.0...v3.0.0) (2026-11-07)
+
+
+### Bug Fixes
+
+* preserve message origins across cluster routing ([d14dc2d](https://github.com/CoCreateJS/cluster/commit/d14dc2d564d7e35d78d2d78c52be0488342eaee7))
+* preserve socket data across cluster routing ([0e15d87](https://github.com/CoCreateJS/cluster/commit/0e15d87f4837cdca2247891110faeff09ab0c016))
+* unify organization presence and mesh lifecycle ([d2d38d0](https://github.com/CoCreateJS/cluster/commit/d2d38d091a32b0a74325f9615f1193746217fc04))
+
+
+### Features
+
+* centralize send routing and unify worker replies ([a3370f5](https://github.com/CoCreateJS/cluster/commit/a3370f5903b66eda62cf4b77fc74d437c857702d))
+* expose unified socket interfaces ([be33cc5](https://github.com/CoCreateJS/cluster/commit/be33cc5cd934ef6887792e10eb2095dd11086960))
+* manage workers through a lifecycle-aware collection ([7a6e772](https://github.com/CoCreateJS/cluster/commit/7a6e7729a645286819760b1c313864df39b4f5db))
+
+
+### BREAKING CHANGES
+
+* server.cluster now exposes peer transport; worker lifecycle remains at server.workers. Component responses must use server.send because socket.send is local-only.
+
 # [2.1.0](https://github.com/CoCreateJS/cluster/compare/v2.0.0...v2.1.0) (2026-11-05)
 
 
