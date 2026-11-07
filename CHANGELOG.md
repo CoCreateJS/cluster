@@ -1,3 +1,11 @@
+## [3.0.1](https://github.com/CoCreateJS/cluster/compare/v3.0.0...v3.0.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* bump CoCreate dependency versions ([c333511](https://github.com/CoCreateJS/cluster/commit/c333511f94cdb493e6810942362f9a44c90e0f14))
+* consolidate CRUD client and server packages ([7b0d75b](https://github.com/CoCreateJS/cluster/commit/7b0d75b23dfcd66436f73a94c2e3f4e89e949507))
+
 # [3.0.0](https://github.com/CoCreateJS/cluster/compare/v2.1.0...v3.0.0) (2026-11-07)
 
 
