@@ -356,9 +356,9 @@ export async function shed(arg, internalCall = false) {
 
     if (isShedding) {
         await cordon(true, true);
-        if (!server.isPrimary && organizations.length > 0 && server.wsManager) {
+        if (!server.isPrimary && organizations.length > 0 && server.socket) {
             console.log(`[@cocreate/cluster] Selective eviction of org IDs:`, organizations);
-            server.wsManager.destroyOrganizations(organizations);
+            server.socket.destroyOrganizations(organizations);
         }
     } else {
         await cordon(false, true);
@@ -399,9 +399,9 @@ export async function drain(value = true, internalCall = false) {
 
     if (isDraining) {
         await cordon(true, true);
-        if (!server.isPrimary && server.wsManager) {
+        if (!server.isPrimary && server.socket) {
             console.log(`[@cocreate/cluster] Worker drain triggered. Purging websocket connections.`);
-            server.wsManager.destroyAll();
+            server.socket.destroyAll();
         }
     } else {
         await cordon(false, true);

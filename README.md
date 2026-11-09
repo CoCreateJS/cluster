@@ -111,11 +111,13 @@ The server composes multiple standalone CoCreate modules into a unified runtime.
 
 ### Built-in server manager
 
-Cluster initializes `server.manager` after CRUD. Its persisted fields are
-`organization_id`, `host` and `apiKey`; a null organization ID means unmanaged.
-The existing primary inventory read hydrates those fields, and fork configuration
-passes them to workers without another database lookup. The runtime `send`
-function is non-enumerable and is not copied into inventory records.
+Cluster resolves `server.manager` from `config.get('manager')` after CRUD. When
+the configured manager organization matches this server's organization, this is
+the manager host: it exposes the local `server.managerService` but has no
+upstream `server.manager` connection. Other servers get an outbound connection
+whose fields come from config, not server inventory. `send` POSTs to the manager
+over `server.fetch`; manager credentials are not read from or persisted to the
+servers collection.
 
 ```js
 if (server.manager.organization_id) {
@@ -123,12 +125,11 @@ if (server.manager.organization_id) {
 }
 ```
 
-`send` POSTs the envelope to `https://<manager.host>/manager`, with the credential
-in the Authorization Bearer header and caller scope removed from JSON. Manager.http delegates provider requests to API.http, which authorizes before
-API.send. Manager resolves parent scope and authorizes server/cluster inventory
-object.update requests before dispatching to CRUD. The manager handler does
-not invoke state.save, preventing mirrored-state loops. Existing API/workflow HTTP
-routes remain available independently.
+`send` POSTs the envelope to `https://<manager.host>/`, with the credential in the
+Authorization Bearer header and caller scope removed from JSON. The central Cluster
+HTTP handler resolves organization scope, authorizes the payload, and dispatches it
+to API, CRUD, workflow, or a registered server event. Manager has no inbound HTTP
+handler; its `server.manager` connection only sends requests.
 
 State's existing persistence helper mirrors successful state.save envelopes once
 after the local write. Each worker sends its existing worker section; the primary
@@ -145,31 +146,27 @@ instance endpoints and server/cluster updates. Cluster/provider AST predicates, 
 preparation, bootstrap handling and initial provider-result synchronization remain
 separate work; this service does not imply those integrations are complete.
 
-### HTTP API and workflow requests
+### HTTP transport
 
-Cluster routes `/api` and its `/api/…` subpaths to `server.api.http(req, res)` and
-`POST /workflows/<name>` to `server.workflow.http(req, res)`, following the existing
-`server.api.webhook(req, res)` entrance pattern. `/manager` and `/manager/…` subpaths
-similarly reach `server.manager.http`. Prefixes respect path segment boundaries,
-so `/apis` and `/managerial` retain normal routing. The API HTTP handler still
-requires `endpoint` in its JSON envelope; path-based endpoint extraction is a
-separate future change. Each module resolves organization
-scope from the hostname and authorizes before execution. The former
-`src/http-operations.js` adapter is removed. Denial, authorization errors or a
-missing authorization service return 403. The shared `server.authorize.request`
-helper checks permission, preserves the sanitized envelope, rejects changes to
-scope/operation targets, and strips the transport API key. Default/key permission merging is
-unchanged, with no extra key-record lookup.
+Cluster owns the inbound HTTP transport. POST requests with a CoCreate JSON payload
+are scoped from the request host, authorized once, and dispatched by payload: API
+requests call `server.api.send`, CRUD requests call `server.crud.send`, workflow
+requests call `server.workflow.run`, and other methods emit their full method name
+through `server.emit`. The request UUID correlates `server.send` responses with the
+open HTTP response. Bodies are limited to 1 MiB; GET and HEAD go to File Server,
+while PUT, PATCH, and DELETE return 405. `/webhooks/*` retains its dedicated API
+handler, and trusted custom `server.routes` run before the default dispatch.
 
-Send `Content-Type: application/json` and an `Authorization: Bearer <key>` header,
-or supply the existing envelope's `apikey` field. Without a key, authorization
-evaluates its normal default permissions. Conflicting header/body keys are
-rejected. Caller-supplied socket/user identity and organization/host scope are
-not trusted. The authorized, sanitized envelope is used for execution, with the
-transport API key removed. Responses use `Cache-Control: no-store`; bodies are
-limited to 1 MiB and only POST is supported.
+Send `Content-Type: application/json` and authenticate with a session Bearer token,
+the `token` cookie, or an API key in `X-API-Key` (an API key may also use Bearer).
+The transport resolves the organization from the host, verifies session tokens,
+overwrites `user_id` with the authenticated identity, and removes `user_id` when
+the session is absent or invalid. Authorization then evaluates the trusted user,
+API key, and configured default permissions. Caller-supplied organization and host
+scope are not trusted. The authorized, sanitized envelope is used for dispatch.
+Responses use `Cache-Control: no-store`.
 
-Example body for `/api`:
+Example API request body:
 
 ```json
 {
@@ -180,21 +177,11 @@ Example body for `/api`:
 }
 ```
 
-The adapter requires `api`, `endpoint` and `method`; the direct `url` shortcut is
-not exposed. Authorization evaluates the existing envelope method, such as
-`post`, rather than a new `api.send` permission. Configure operation/data
-restrictions instead of granting an unrestricted HTTP verb for managed scaling.
-
-Example body for `/workflows/example`:
+Example workflow request body:
 
 ```json
-{ "example": [{ "input": "value" }] }
+{ "method": "workflow.example", "example": [{ "input": "value" }] }
 ```
-
-The adapter sets `method: "workflow.example"`; an explicit method must match the
-path. No permissions are granted by these routes. `/webhooks/*` retains its AST
-handler, and trusted custom `server.routes` retain their existing precedence.
-Managed credentials and parent dispatch remain separate integration work.
 
 ### Node API key initialization
 
@@ -903,41 +890,30 @@ organization git metadata is performed.
 
 ## Platform organization activation
 
-Manager exposes non-enumerable send(envelope), createServer(cluster, deployment),
-terminateServer(cluster, deployment), http and config
-properties; only parent connection fields are serialized. Initialization loads the
-platform organizationConnection settings after CRUD/API/workflows. Its enabled flag
-controls Mesh's optional creation hook; tenant signup does not copy that platform config.
+Manager exposes `server.managerService` methods for local HTTP handling and
+platform provisioning. The optional outbound connection lives at `server.manager`
+and is resolved from `config.get('manager')`. The config `enabled` flag controls
+the platform's optional creation hook; tenant signup does not copy that platform setting.
 
-On activation, Mesh reads the organization-type cluster by manager.for (tenant organization ID) and
-manager.organization_id (platform ID), then its running servers in platform scope. This query uses cluster_id and master.status
-running, without peer discovery's smaller-ID filter. If no running server is returned,
-Mesh invokes manager.createServer(cluster). Nonrunning inventory, including failed
-records, does not block creation or get deleted by this decision.
+On activation, Mesh emits `organizationPeers` after its peer lookup. The platform
+Manager listens for an empty peer list and looks up the organization cluster by
+`managedOrganization`; manager identity is resolved from runtime config. It
+then calls the platform-local `managerService.createServer(cluster)`. Nonrunning
+inventory, including failed records, does not block creation or get deleted by
+this decision.
 
-Manager executes the command without inventory eligibility queries, reservations or
-creation deduplication. It uses the supplied cluster.initialDeployment, provider profile,
-storage reference, hostname and runtime settings, resolving the tenant bootstrap
-source using cluster.manager.for for script preparation. Cluster.name is an editable label;
-cluster.manager stores organization_id, host and for in both database copies. initialDeployment
-and repositories remain top-level cluster configuration. Signup prepares those documents
-and repository registration, then awaits manager.createServer(cluster) before reporting success. Later Mesh activation retains its running-server creation decision. Manager creates platform and tenant inventory before dispatching
-the existing create-organization-server workflow, mirrors the provider patch, and retains
-the existing startup watchdog. Concurrent creation commands are allowed; ordinary
-AutoScaler policy handles excess running capacity. ensureServer is removed.
+Manager executes initial server creation without inventory eligibility queries,
+reservations or creation deduplication. It uses the supplied cluster.initialDeployment,
+provider profile, storage reference, hostname and runtime settings, resolving the tenant
+bootstrap source using `managedOrganization` for script preparation. Cluster.name is an
+editable label; the cluster stores no manager identity. `managedOrganization`,
+initialDeployment and repositories remain top-level cluster configuration. Manager
+creates platform and tenant inventory before dispatching the `createOrganizationServer`
+workflow, mirrors the provider patch, and retains the existing startup watchdog.
 
-Managed scale-out passes its chosen deployment and server_id to the same createServer
-path after API.http authorization. Omitting deployment uses cluster.initialDeployment;
-passing it leaves that static anchor unchanged. Parent inventory, configuration and
-provider operations use platform identity. Startup data uses cluster.manager.for,
-and both inventories receive the same server/cluster IDs and provider patch before
-success is returned. The requested cloud must match the authorized API.
-
-Managed scale-in includes cluster_id and dispatches terminateServer. It mirrors
-terminating before the parent-scoped provider request and failed on rejection;
-success retains terminating and schedules the existing cleanup. AutoScaler still
-owns draining, transport retry and final shutdown. deleteServer only removes inventory.
-Scale-in accepts the persisted infrastructure.instanceId as its provider VM identifier.
+Tenant AutoScaler requests use `server.manager.send` to post their API or CRUD envelopes
+to the platform root. The central HTTP transport scopes, authorizes and dispatches those
+payloads directly. Manager has no inbound HTTP handler.
 
 
 ## Mesh peer connection and close contract
@@ -956,7 +932,7 @@ After the drain/capacity sequence, AutoScaler commits master.status terminating 
 
 AutoScaler stores removal outcomes in master.status. Capacity/drain cancellations before provider dispatch restore running; termination failures remain failed. The separate decommission status object is no longer used; decommissionStrategy remains the policy configuration name.
 
-After persisting a managed server terminating update, Manager schedules cleanup once after one minute. It resolves the tenant scope from the stored cluster.manager.for and calls AutoScaler's shared deleteServer helper to delete the tenant and platform copies, without rechecking server status or calling the cloud provider. Duplicate reports do not postpone cleanup. A successfully persisted failed update cancels the pending timer directly. AutoScaler also sweeps its own cluster every ten minutes, starting ten minutes after initialization; managed sweeps request platform deletion through the authorized Manager object.delete servers operation. Already-missing records are successful deletions. Failed records are not selected. The management permission reference includes server-only deletion; existing issued keys require that grant for tenant-initiated platform cleanup. These process-local timers do not survive restarts.
+After persisting a managed server terminating update, Manager schedules cleanup once after one minute. It resolves the tenant scope from the stored cluster.managedOrganization and calls AutoScaler's shared deleteServer helper to delete the tenant and platform copies, without rechecking server status or calling the cloud provider. Duplicate reports do not postpone cleanup. A successfully persisted failed update cancels the pending timer directly. AutoScaler also sweeps its own cluster every ten minutes, starting ten minutes after initialization; managed sweeps request platform deletion through the authorized Manager object.delete servers operation. Already-missing records are successful deletions. Failed records are not selected. The management permission reference includes server-only deletion; existing issued keys require that grant for tenant-initiated platform cleanup. These process-local timers do not survive restarts.
 
 
 ### Organization removal and scale-to-zero

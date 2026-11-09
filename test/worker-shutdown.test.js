@@ -21,7 +21,7 @@ async function setup(t) {
         isPrimary: false, workerId: 1, organization_id: 'platform',
         on: (name, listener) => events.set(name, listener),
         closeEdgeListeners: () => order.push('cordon'),
-        wsManager: { destroyAll: () => order.push('drain') },
+        socket: { destroyAll: () => order.push('drain') },
         send: () => {},
         crud: { send: async request => { if (request.method === 'object.read') return { object: [] }; order.push('save'); return { object: [request.object] }; } },
         repository: { stop: () => { throw new Error('workers must not checkpoint repositories'); } },

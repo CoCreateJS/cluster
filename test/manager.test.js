@@ -3,11 +3,12 @@ import test from 'node:test';
 import Http from 'node:http';
 import config from '@cocreate/config';
 import { init } from '../src/manager.js';
+import Fetch from '../src/Fetch.js';
 
 test('manager serializes only connection fields and directly sends the existing envelope', async t => {
     t.mock.method(config, 'get', () => undefined);
     t.mock.method(config, 'query', async () => undefined);
-    const manager = await init({ isPrimary: true });
+    const manager = await init({ isPrimary: true, fetch: Fetch });
     assert.equal(manager.organization_id, null);
     Object.assign(manager, { organization_id: 'parent', host: 'parent.test', apiKey: 'test-only-key' });
     assert.equal(typeof manager.send, 'function');
@@ -86,7 +87,7 @@ test('manager failures log phase and node context without credentials or raw res
     t.mock.method(config, 'query', async () => undefined);
     const logs = [];
     t.mock.method(console, 'error', (...args) => logs.push(args));
-    const manager = await init({ isPrimary: true, id: 'local-server', cluster_id: 'cluster-1' });
+    const manager = await init({ isPrimary: true, id: 'local-server', cluster_id: 'cluster-1', fetch: Fetch });
     Object.assign(manager, { organization_id: 'parent', host: 'parent.test', apiKey: 'private-manager-key' });
     const request = { method: 'post', endpoint: 'create-instance', data: { server_id: 'new-server', cluster_id: 'cluster-1' } };
     for (const [phase, respond] of [

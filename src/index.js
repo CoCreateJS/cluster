@@ -17,8 +17,6 @@
  ********************************************************************************/
 
 import { EventEmitter } from 'node:events';
-import Http from 'node:http';
-import Https from 'node:https';
 
 import TLS from '@cocreate/tls';
 import ServerMesh from './mesh/index.js';
@@ -39,6 +37,8 @@ import { ObjectId, getClientInfo } from '@cocreate/utils';
 
 import getInfrastructure from './getInfrastructure.js';
 import Manager from './manager.js';
+import Fetch from './Fetch.js';
+import http from './HTTP.js';
 import IPC from './ipc.js';
 import Storage from './storage.js';
 import State from './state.js';
@@ -49,6 +49,7 @@ import Repository from './repository/index.js';
 import Workers from './workers.js';
 
 export { Workers as ClusterManager } from './workers.js';
+export { setupHost } from './startup.js';
 
 /**
  * CoCreateServer orchestrates socket handling, API endpoint dispatching,
@@ -62,6 +63,8 @@ export class CoCreateServer {
     constructor() {
         this.id = process.env.SERVER_ID || null;
         this.isInitialized = false;
+        this.fetch = Fetch;
+        this.responseListeners = new Map();
 
         // Dynamic route registry (Map key: route path, value: request handler callback)
         this.routes = new Map();
@@ -132,7 +135,6 @@ export class CoCreateServer {
         const config = await Config.prompt({
             'organization_id': '',
             'host': '',
-            'workers': '',
             'server_id': ''
         });
 
@@ -153,7 +155,7 @@ export class CoCreateServer {
         }
 
         // Configure the local worker collection
-        this.workers.configureWorkers(config.workers);
+        this.workers.configureWorkers(Config.get('workers'));
 
         this.crud = await crudServer.init(this);
         try {
@@ -194,10 +196,6 @@ export class CoCreateServer {
                     throw new Error('Unable to read the previous worker profile.');
 
                 persistedServer = response.object[0];
-                if (persistedServer?.manager) {
-                    const { organization_id, host, apiKey } = persistedServer.manager;
-                    Object.assign(this.manager, { organization_id, host, apiKey });
-                }
             } catch (error) {
                 console.warn('[@cocreate/cluster] Could not clear unused worker fields:', error);
             }
@@ -255,52 +253,9 @@ export class CoCreateServer {
             // Initialize certificates module on worker
             this.tls = await TLS.init(this);
 
-            // Create HTTPS options with dynamic SNICallback for multi-tenant domains
-            const httpsOptions = this.tls.createHttpsOptions(this);
-            this.https = Https.createServer(httpsOptions, (req, res) => this.#handleEdgeRequest(req, res));
-
-            const HTTP_PORT = process.env.HTTP_PORT || 80;
-            const HTTPS_PORT = process.env.HTTPS_PORT || 443;
-            const BIND_IP = process.env.BIND_IP || '0.0.0.0';
-
-            this.http = Http.createServer((req, res) => {
-                const requestUrl = req.url || '/';
-
-                // 1. Allow ACME challenges to pass through over unencrypted HTTP
-                if (requestUrl.startsWith('/.well-known/acme-challenge/')) {
-                    return this.#handleEdgeRequest(req, res);
-                }
-
-                // 2. Force a 301 redirect to HTTPS for all traffic (preserving non-standard ports)
-                const rawHost = req.headers.host || 'localhost';
-                const host = rawHost.split(':')[0];
-                const portSuffix = (HTTPS_PORT && String(HTTPS_PORT) !== '443') ? `:${HTTPS_PORT}` : '';
-
-                res.writeHead(301, { "Location": `https://${host}${portSuffix}${requestUrl}` });
-                res.end();
-            });
-
-            this.wsManager = new SocketServer(this);
-            this.socket = this.wsManager.collection;
-            this.wsManager.on('api', this.api.send);
-            this.wsManager.on('workflow', this.workflow.run);
+            this.socket = new SocketServer(this);
             this.files = await FileServer.init(this);
-
-            const reportListening = (state) => {
-                if (process.connected) {
-                    process.send({ type: 'listening_state', state });
-                }
-            };
-
-            this.http.on('listening', () => reportListening(true));
-            this.http.on('close', () => reportListening(false));
-            this.http.listen(HTTP_PORT, BIND_IP, () => {
-                console.log(`[@cocreate/cluster] [WORKER ${this.workerId}] HTTP listening on ${BIND_IP}:${HTTP_PORT}`);
-            });
-
-            this.https.listen(HTTPS_PORT, BIND_IP, () => {
-                console.log(`[@cocreate/cluster] [WORKER ${this.workerId}] HTTPS listening on ${BIND_IP}:${HTTPS_PORT}`);
-            });
+            await http.init(this);
 
             // Publish worker active running state object to DB upon creation/startup
             await this.state.save('running');
@@ -325,84 +280,6 @@ export class CoCreateServer {
         return this;
     }
 
-    /**
-     * Internal private request handler that evaluates registered user routes,
-     * matching exact paths or wildcard directory patterns from this.routes Map.
-     * @param {Http.IncomingMessage} req 
-     * @param {Http.ServerResponse} res 
-     */
-    async #handleEdgeRequest(req, res) {
-        try {
-            const rawUrl = req.url || '/';
-            const [reqPath] = rawUrl.split('?');
-
-            if (
-                !reqPath.startsWith('/.well-known/acme-challenge/') &&
-                this.tls?.checkOrganizationAccess
-            ) {
-                const access = await this.tls.checkOrganizationAccess(req.headers.host);
-                if (access.allowed === false) {
-                    res.writeHead(402, {
-                        'Content-Type': 'application/json; charset=utf-8',
-                        'Cache-Control': 'no-store',
-                        'Account-Balance': 'false'
-                    });
-                    res.end(JSON.stringify({
-                        error: 'Organization balance depleted',
-                        organizationBalance: false,
-                        balance: access.balance,
-                        currency: access.currency
-                    }));
-                    return;
-                }
-            }
-
-            // 1. Direct O(1) exact match lookup or directory/wildcard pattern matching in this.routes Map
-            let handler = this.routes.get(reqPath);
-
-            if (!handler) {
-                for (const [routePath, routeHandler] of this.routes.entries()) {
-                    if (routePath === '*' || (routePath.endsWith('*') && reqPath.startsWith(routePath.slice(0, -1)))) {
-                        handler = routeHandler;
-                        break;
-                    }
-                }
-            }
-
-            if (handler && typeof handler === 'function') {
-                await handler(req, res);
-
-                // If handler responded or started sending headers, conclude routing cycle
-                if (res.writableEnded || res.headersSent) {
-                    return;
-                }
-            }
-
-            if (reqPath === '/manager' || reqPath.startsWith('/manager/')) {
-                return this.manager.http(req, res);
-            }
-            if (reqPath === '/api' || reqPath.startsWith('/api/')) {
-                return this.api.http(req, res);
-            }
-            if (reqPath.startsWith('/workflows/')) {
-                return this.workflow.http(req, res);
-            }
-
-            // 2. Default route handling: API webhooks
-            if (reqPath.startsWith("/webhooks/")) {
-                return this.api.webhook(req, res);
-            }
-
-            // 3. Default route handling: Static file server
-            return this.files.send(req, res);
-        } catch (error) {
-            console.error('[@cocreate/cluster] Edge request routing error:', error);
-            if (!res.headersSent) {
-                res.writeHead(500, { "Content-Type": "text/plain" });
-            }
-            res.end("Internal Error: Request routing failed");
-        }
-    }
 }
 
 export default new CoCreateServer();

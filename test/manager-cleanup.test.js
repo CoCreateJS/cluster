@@ -3,6 +3,7 @@ import test from 'node:test';
 import { Readable } from 'node:stream';
 import { setImmediate } from 'node:timers/promises';
 import { init } from '../src/manager.js';
+import apiKeySeed from '../../../CoCreate-app/src/apps/api-keys/config/data.json' with { type: 'json' };
 
 const id = 'server-1';
 const update = status => ({
@@ -167,7 +168,8 @@ test('Manager reports actual deletion failure instead of treating it as an absen
     assert.equal((await post(server.manager, { method: 'object.delete', array: 'servers', object: { _id: id } })).status, 500);
 });
 
-test('management permission reference grants deletion only for server inventory', async () => {
-    const { default: reference } = await import('../../../CoCreate-app/src/apps/api-keys/config/managed-cluster.js');
-    assert.deepEqual(reference.object[0].methods.object.delete, { $array: ['servers'] });
+test('managed-cluster role grants deletion only for server inventory', () => {
+    const role = apiKeySeed.object.find(item => item._id === '6b0700000000000000000021');
+    assert.equal(role.type, 'role');
+    assert.deepEqual(role.methods.object.delete, { $array: ['servers'] });
 });

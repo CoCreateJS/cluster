@@ -49,7 +49,7 @@ export class Workers extends Map {
         this.workerId = this.isPrimary ? null : (parseInt(process.env.WORKER_ID, 10) || 1);
     }
 
-    get isWorker() { return !this.isPrimary || this.#config.workers <= 1; }
+    get isWorker() { return !this.isPrimary || this.#config.workers === 0; }
 
     /** Compatibility collection view for the former ClusterManager interface. */
     get workers() { return this; }
@@ -64,21 +64,27 @@ export class Workers extends Map {
 
     /**
      * Resolves worker count configuration and assigns worker identity.
-     * @param {string|number|boolean} configuredWorkers - Worker configuration value.
+     * @param {string|number|boolean} [configuredWorkers] - Fork count; unset uses CPU count, zero runs work in the primary, and negative values reserve CPUs.
  * @private
  * @environment server
  */
     configureWorkers(configuredWorkers) {
-        if (configuredWorkers !== false && configuredWorkers !== 'false') {
-            const parsedWorkers = parseInt(configuredWorkers, 10);
-            if (parsedWorkers < 0) {
-                this.#config.workers = Math.max(1, os.cpus().length + parsedWorkers);
-            } else {
-                this.#config.workers = parsedWorkers || os.cpus().length;
+        const cpuCount = os.cpus().length;
+        if (configuredWorkers === undefined || configuredWorkers === null || configuredWorkers === '') {
+            this.#config.workers = cpuCount;
+        } else if (configuredWorkers === false || configuredWorkers === 'false') {
+            this.#config.workers = 0;
+        } else {
+            const parsedWorkers = Number(configuredWorkers);
+            if (!Number.isInteger(parsedWorkers)) {
+                throw new TypeError('Worker count must be an integer, false, or unset.');
             }
+            this.#config.workers = parsedWorkers < 0
+                ? Math.max(0, cpuCount + parsedWorkers)
+                : parsedWorkers;
         }
 
-        if (this.isPrimary && this.#config.workers <= 1) {
+        if (this.isPrimary && this.#config.workers === 0) {
             this.workerId = 1;
         }
 
@@ -248,7 +254,6 @@ export class Workers extends Map {
             SERVER_IP: String(this.server.ip || '127.0.0.1'),
             SERVER_INFRASTRUCTURE: JSON.stringify(this.server.infrastructure || {}),
             SERVER_LOCATION: JSON.stringify(this.server.location || {}),
-            SERVER_MANAGER: JSON.stringify(this.server.manager || {})
         });
         worker.on('error', error => {
             console.error(`[@cocreate/cluster] [MASTER] Error on Worker ${workerId}:`, error.message);

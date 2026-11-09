@@ -74,7 +74,7 @@ export class ServerMeshOutbound {
 
     /**
      * Discovers an organization's older running peers and connects them.
-     * An empty non-local organization notifies Manager to start its cluster.
+     * The peer results are emitted for interested server components.
      */
     async getServers(organization_id = this.server?.organization_id) {
         if (!this.server?.crud || !organization_id) return;
@@ -104,7 +104,7 @@ export class ServerMeshOutbound {
             }
             const peers = this.normalizePeersList(readResult);
             if (ownOrganization) this.peers = peers;
-            if (!ownOrganization && !peers.length) this.server.manager.startCluster(organization_id);
+            this.server.emit?.('organizationPeers', { organization_id, peers });
             for (const targetPeer of peers) {
                 this.connectPeer(targetPeer, peers.length, ownOrganization ? undefined : organization_id);
             }

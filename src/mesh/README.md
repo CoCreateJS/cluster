@@ -217,6 +217,7 @@ Close Organization Mesh Sockets
 | --- | --- |
 | `orgConnected` | A worker reports its first local connection. IPC adds its worker mapping and emits the same event on the primary only when the organization gains its first worker. Mesh and AutoScaler listen independently. |
 | `orgDisconnected` | A worker reports its local departure. IPC removes that worker's organization mapping and emits the same event on the primary only when the final worker leaves. Mesh and AutoScaler listen independently. |
+| `organizationPeers` | After a successful peer lookup, Mesh emits `{ organization_id, peers }` on the primary server emitter. Interested components decide how to use the result; Manager starts provisioning when the list is empty. |
 
 The first local worker creates an empty entry in `mesh.organizations` and sends
 `orgRegistered` over every pathless control socket. A peer responds only when
@@ -241,6 +242,13 @@ Mesh opens the organization and discovers peers. On disconnection, Mesh closes
 organization sockets with code 1000 and removes its organization entry. Peers
 observe socket closure; no organization-removal message is sent. AutoScaler
 independently evaluates its configured scale-to-zero policy.
+
+After a successful lookup, Mesh emits `organizationPeers` with the returned
+peer records. The current lookup returns running organization peers with IDs
+lower than the local server ID, which is the set this node may dial without
+creating duplicate peer connections. An empty result therefore means no peers
+matched that lookup; it does not prove that no higher-ID organization server
+exists. A failed lookup emits no `organizationPeers` event.
 
 All organizations follow the same worker cleanup rules, including the server's
 own organization. There are no resource-retention flags. Socket Server deletes

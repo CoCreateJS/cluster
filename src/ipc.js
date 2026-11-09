@@ -33,7 +33,7 @@ const organizationDelivery = payload => Boolean(payload.organization_id &&
 export function init(server, pendingPromises) {
     const organizationWorkers = server.organizationWorkers ||= new Map();
 
-    function transportEnvelope({ wsManager, ...payload }) { return payload; }
+    function transportEnvelope(payload) { return payload; }
 
     function request(send, payload, key, workerId) {
         return new Promise((resolve, reject) => {
@@ -175,6 +175,16 @@ export function init(server, pendingPromises) {
             }
         }
         payload.status ||= 'sent';
+
+        const responseListener = server.responseListeners?.get(payload.uuid);
+        if (responseListener) {
+            server.responseListeners.delete(payload.uuid);
+            try { responseListener(payload); }
+            catch (error) {
+                console.error('[@cocreate/cluster] HTTP response listener failed:', error);
+            }
+        }
+
         if (payload.response === true) {
             if (server.isPrimary) {
                 if (payload.workerId == null) resolveResponse(payload, payload.uuid);
