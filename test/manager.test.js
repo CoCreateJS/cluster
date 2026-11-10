@@ -3,7 +3,7 @@ import test from 'node:test';
 import Http from 'node:http';
 import config from '@cocreate/config';
 import { init } from '../src/manager.js';
-import Fetch from '../src/Fetch.js';
+import Fetch from '../src/fetch.js';
 
 test('manager serializes only connection fields and directly sends the existing envelope', async t => {
     t.mock.method(config, 'get', () => undefined);

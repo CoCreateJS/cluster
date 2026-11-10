@@ -78,8 +78,8 @@ async function probeAWS() {
         provider: 'aws',
         region: doc.region,
         zone: doc.availabilityZone,
-        vmId: doc.instanceId,
-        vmType: doc.instanceType
+        id: doc.instanceId,
+        type: doc.instanceType
     };
 }
 
@@ -98,14 +98,14 @@ async function probeGCP() {
     const doc = JSON.parse(docStr);
     const zone = doc.zone ? doc.zone.split('/').pop() : 'unknown';
     const region = zone.slice(0, zone.lastIndexOf('-'));
-    const vmType = doc.machineType ? doc.machineType.split('/').pop() : 'unknown';
+    const type = doc.machineType ? doc.machineType.split('/').pop() : 'unknown';
 
     return {
         provider: 'gcp',
         region,
         zone,
-        vmId: doc.id ? String(doc.id) : 'unknown',
-        vmType
+        id: doc.id ? String(doc.id) : 'unknown',
+        type
     };
 }
 
@@ -128,8 +128,8 @@ async function probeAzure() {
         provider: 'azure',
         region: compute.location || 'unknown',
         zone: compute.zone || 'unknown',
-        vmId: compute.vmId || 'unknown',
-        vmType: compute.vmSize || 'unknown'
+        id: compute.vmId || 'unknown',
+        type: compute.vmSize || 'unknown'
     };
 }
 
@@ -149,8 +149,8 @@ async function probeDigitalOcean() {
         provider: 'digitalocean',
         region: doc.region || 'unknown',
         zone: doc.region ? `${doc.region}-a` : 'unknown',
-        vmId: doc.droplet_id ? String(doc.droplet_id) : 'unknown',
-        vmType: doc.size || 'unknown'
+        id: doc.droplet_id ? String(doc.droplet_id) : 'unknown',
+        type: doc.size || 'unknown'
     };
 }
 
@@ -171,8 +171,8 @@ async function probeOCI() {
         provider: 'oracle',
         region: doc.region || 'unknown',
         zone: doc.faultDomain || 'unknown',
-        vmId: doc.id || 'unknown',
-        vmType: doc.shape || 'unknown'
+        id: doc.id || 'unknown',
+        type: doc.shape || 'unknown'
     };
 }
 
@@ -205,8 +205,8 @@ async function probeHetzner() {
         provider: 'hetzner',
         region,
         zone,
-        vmId: meta['instance-id'] || 'unknown',
-        vmType: 'cloud-vm'
+        id: meta['instance-id'] || 'unknown',
+        type: 'cloud-vm'
     };
 }
 
@@ -231,8 +231,8 @@ async function probeVultr() {
         provider: 'vultr',
         region: 'vultr-global',
         zone: 'vultr-zone',
-        vmId: idStr ? idStr.trim() : 'unknown',
-        vmType: hostStr ? hostStr.trim() : 'vultr-instance'
+        id: idStr ? idStr.trim() : 'unknown',
+        type: hostStr ? hostStr.trim() : 'vultr-instance'
     };
 }
 
@@ -251,8 +251,8 @@ async function probeEquinix() {
         provider: 'equinix-metal',
         region: doc.metro || doc.facility || 'unknown',
         zone: doc.facility || 'unknown',
-        vmId: doc.id || 'unknown',
-        vmType: doc.plan || 'baremetal-metal'
+        id: doc.id || 'unknown',
+        type: doc.plan || 'baremetal-metal'
     };
 }
 
@@ -281,8 +281,8 @@ function resolveBareMetalIdentity() {
                     provider: 'baremetal',
                     region: 'on-premise',
                     zone: 'on-premise-datacenter',
-                    vmId: productName.replace(/\s+/g, '-').toLowerCase(),
-                    vmType: `${vendorName}-${productName}`.replace(/\s+/g, '-').toLowerCase()
+                    id: productName.replace(/\s+/g, '-').toLowerCase(),
+                    type: `${vendorName}-${productName}`.replace(/\s+/g, '-').toLowerCase()
                 };
             }
         }
@@ -292,21 +292,21 @@ function resolveBareMetalIdentity() {
     return null;
 }
 
-/* STREAMING_CHUNK: Running the infallible infrastructure resolver... */
+/* STREAMING_CHUNK: Running the infallible deployment resolver... */
 /**
- * Dynamically resolves the host's physical infrastructure environment.
+ * Dynamically resolves the host's physical deployment environment.
  * Runs exactly once during the server boot sequence. Guaranteed to never throw.
  * 
- * @param {string} masterVmId - The pre-configured fallback instance ID
- * @returns {Promise<Object>} Resolved server.infrastructure payload
+ * @param {string} fallbackId - The pre-configured fallback instance ID
+ * @returns {Promise<Object>} Resolved server.deployment payload
  */
-export async function getInfrastructure(masterVmId) {
+async function probeDeployment(fallbackId) {
     const localFallback = {
         provider: 'local',
         region: 'local',
         zone: 'local',
-        vmId: masterVmId,
-        vmType: 'local'
+        id: fallbackId,
+        type: 'local'
     };
 
     try {
@@ -333,7 +333,6 @@ export async function getInfrastructure(masterVmId) {
         try {
             const bareMetalInfo = resolveBareMetalIdentity();
             if (bareMetalInfo) {
-                bareMetalInfo.instanceId = masterVmId;
                 return bareMetalInfo;
             }
         } catch (err) {
@@ -346,8 +345,8 @@ export async function getInfrastructure(masterVmId) {
                 provider: process.env.PROVIDER,
                 region: process.env.REGION || 'unknown',
                 zone: process.env.ZONE || 'unknown',
-                vmId: process.env.VM_ID || masterVmId,
-                vmType: process.env.VM_TYPE || 'unknown'
+                id: process.env.VM_ID || fallbackId,
+                type: process.env.SERVER_TYPE || process.env.VM_TYPE || 'unknown'
             };
         }
 
@@ -359,4 +358,20 @@ export async function getInfrastructure(masterVmId) {
     return localFallback;
 }
 
-export default getInfrastructure;
+/** Enrich a saved deployment without dropping configured cloud, DNS or capacity. */
+export async function getDeployment(fallbackId, existing = {}) {
+    const reported = await probeDeployment(fallbackId);
+    const deployment = { ...existing };
+    // An unavailable cloud metadata service must not turn a saved cloud deployment
+    // into a local/bare-metal fallback or replace its provider resource ID.
+    if (['local', 'baremetal'].includes(reported.provider) &&
+        existing.provider && existing.provider !== reported.provider) return deployment;
+    for (const [key, value] of Object.entries(reported)) {
+        if (value !== undefined && value !== null && value !== '' && value !== 'unknown') {
+            deployment[key] = value;
+        }
+    }
+    return deployment;
+}
+
+export default getDeployment;

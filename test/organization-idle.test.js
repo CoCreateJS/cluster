@@ -26,13 +26,13 @@ async function setup(t, { minimum = 0, enabled = true, workers = 1, telemetry = 
             for (const listener of cluster.listeners(event)) if (!listeners.includes(listener)) cluster.removeListener(event, listener);
         }
     });
-    const record = { _id: 'node', cluster_id: 'cluster', cloud: 'cloud', master: { status: 'running' },
-        infrastructure: { vmId: 'vm', region: 'us-east-1', vCPU: 2, memoryGb: 2 } };
+    const record = { _id: 'node', cluster_id: 'cluster', master: { status: 'running' },
+        deployment: { cloud: 'cloud', dns: [], id: 'vm', region: 'us-east-1', vCPU: 2, memoryGb: 2 } };
     const calls = [];
     const server = Object.assign(new EventEmitter(), {
         id: 'node', organization_id: 'tenant', host: 'tenant.test', cluster_id: 'cluster',
         isPrimary: true, isWorker: true, workers: new Map(),
-        api: { send: async request => { calls.push(['terminate', request]); return { success: true }; } },
+        workflow: { run: async request => { calls.push(['terminate', request]); return { success: true }; } },
         state: {
             drain: async value => calls.push(['drain', value]),
             shutdown: payload => calls.push(['shutdown', payload])
@@ -92,6 +92,10 @@ test('own-organization last-client grace triggers the existing termination lifec
     await advance(t, 1000);
     assert.deepEqual(calls.map(call => call[0]), ['status', 'drain', 'status', 'terminate', 'shutdown']);
     assert.equal(calls[2][1], 'terminating');
+    const termination = calls.find(call => call[0] === 'terminate')[1];
+    assert.equal(termination.method, 'workflow.deleteOrganizationServer');
+    assert.equal(termination.deleteOrganizationServer.deployment.server_id, 'node');
+    assert.equal(termination.deleteOrganizationServer.deployment.id, 'vm');
     assert.deepEqual(logs, []);
 });
 

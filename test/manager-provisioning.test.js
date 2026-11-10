@@ -14,7 +14,7 @@ const clone = value => structuredClone(value);
 async function setup(t, options = {}) {
     const cluster = {
         _id: clusterId, name: 'Production', manager: { organization_id: platform, host: 'platform.test', for: tenant }, type: 'organization', host: 'tenant.test',
-        initialDeployment: { cloud: 'cloud-api', region: 'example-region', vmType: 'suitable' }, storage: 'storage-api',
+        deployment: { cloud: 'cloud-api', region: 'example-region', type: 'suitable' }, storage: 'storage-api',
         binaryUrl: 'https://example.test/runtime.tar.gz', ...options.cluster
     };
     const requests = [], calls = [], inventory = new Map();
@@ -48,7 +48,7 @@ async function setup(t, options = {}) {
                 return { object: [] };
             }
             if (request.organization_id === tenant) {
-                if (options.failProjection || (options.failFinalProjection && request.object['infrastructure.instanceId'])) return { error: ['projection failed'] };
+                if (options.failProjection || (options.failFinalProjection && request.object['deployment.id'])) return { error: ['projection failed'] };
                 return { object: [clone(update(tenantRecords, request.object))] };
             }
             assert.equal(request.organization_id, platform);
@@ -90,7 +90,7 @@ async function setup(t, options = {}) {
             const tenantRecord = tenantRecords.get(input.server._id);
             tenantRecord.master.status = 'running'; // Simulate startup racing the provider response.
             tenantRecord.ip = '203.0.113.10';
-            const patch = { _id: input.server._id, status: 'starting', 'infrastructure.instanceId': 'instance-1' };
+            const patch = { _id: input.server._id, status: 'starting', 'deployment.id': 'instance-1' };
             await server.crud.send({ method: 'object.update', array: 'servers', organization_id: platform, host: server.host, object: patch });
             return { 'create-organization-server': [{ patch, server: clone(inventory.get(patch._id)) }] };
         } }
@@ -123,7 +123,7 @@ const scalingRequest = endpoint => ({
     api: 'platform-cloud', endpoint, method: 'post', region: 'example-region',
     organization_id: tenant, host: 'tenant.test',
     data: { cluster_id: clusterId, server_id: 'dddddddddddddddddddddddd',
-        cloud: 'cloud-api', vmType: 'too-small', region: 'example-region', vmId: 'instance-1', name: 'scale-out' }
+        cloud: 'cloud-api', type: 'too-small', region: 'example-region', id: 'instance-1', name: 'scale-out' }
 });
 
 test('managed scale-out reuses creation with selected placement and tenant bootstrap under parent scope', async t => {
@@ -132,13 +132,13 @@ test('managed scale-out reuses creation with selected placement and tenant boots
     const input = scalingRequest('create-instance');
     const response = await managedRequest(handler, input);
     assert.equal(response.status, 200);
-    assert.equal(response.body.data.instanceId, 'instance-1');
+    assert.equal(response.body.data.id, 'instance-1');
     const id = input.data.server_id;
     for (const records of [inventory, tenantRecords]) {
         assert.equal(records.size, 1);
         assert.equal(records.get(id).cluster_id, clusterId);
-        assert.equal(records.get(id).infrastructure.vmType, 'too-small');
-        assert.equal(records.get(id).infrastructure.instanceId, 'instance-1');
+        assert.equal(records.get(id).deployment.type, 'too-small');
+        assert.equal(records.get(id).deployment.id, 'instance-1');
     }
     assert.deepEqual(cluster, savedCluster, 'scaling leaves the stored initial deployment unchanged');
     const workflow = calls[0];
@@ -196,7 +196,7 @@ for (const failTermination of [false, true]) {
         assert.equal(calls.length, 1);
         assert.equal(calls[0].endpoint, 'delete-instance');
         assert.equal(calls[0].data.cluster_id, clusterId);
-        assert.equal(calls[0].data.vmId, 'instance-1');
+        assert.equal(calls[0].data.id, 'instance-1');
         for (const records of [inventory, tenantRecords]) {
             assert.equal(records.get(input.data.server_id).master.status, failTermination ? 'failed' : 'terminating');
         }
@@ -223,9 +223,9 @@ test('createServer uses the supplied cluster and mirrors tenant bootstrap and pr
     assert.equal(bootstrap.cluster_id, clusterId);
     assert.equal(bootstrap.storage.connectionString, 'mongodb://tenant-only.test');
     assert.equal(bootstrap.apikey, undefined);
-    assert.equal(inventory.get(input.server._id).infrastructure.vmType, 'suitable');
-    assert.equal(inventory.get(input.server._id).infrastructure.instanceId, 'instance-1');
-    assert.equal(tenantRecords.get(input.server._id).infrastructure.instanceId, 'instance-1');
+    assert.equal(inventory.get(input.server._id).deployment.type, 'suitable');
+    assert.equal(inventory.get(input.server._id).deployment.id, 'instance-1');
+    assert.equal(tenantRecords.get(input.server._id).deployment.id, 'instance-1');
     assert.equal(tenantRecords.get(input.server._id).master.status, 'running');
     assert.deepEqual(tenantRecords.get(input.server._id).manager, {
         organization_id: platform, host: 'platform.test', apiKey: 'test-only-management-key'
@@ -281,23 +281,23 @@ test('Manager exposes its activation settings without serializing them', async t
     assert.deepEqual(requests, []);
 });
 
-for (const initial of [undefined, {}, { cloud: 'cloud-api', region: 'example-region', vmType: 'unknown' }]) {
-    test(`invalid initialDeployment ${JSON.stringify(initial)} fails before inventory creation`, async t => {
-        const { handler, cluster, inventory } = await setup(t, { cluster: { initialDeployment: initial } });
+for (const initial of [undefined, {}, { cloud: 'cloud-api', region: 'example-region', type: 'unknown' }]) {
+    test(`invalid deployment ${JSON.stringify(initial)} fails before inventory creation`, async t => {
+        const { handler, cluster, inventory } = await setup(t, { cluster: { deployment: initial } });
         await assert.rejects(handler.createServer(cluster));
         assert.equal(inventory.size, 0);
     });
 }
 
-test('initialDeployment controls placement despite different legacy fields', async t => {
+test('deployment controls placement despite different legacy fields', async t => {
     const { handler, cluster, inventory } = await setup(t, { cluster: {
-        clouds: ['unrelated-cloud'], region: 'legacy-region', vmType: 'too-small', vertical: { min: { vCPU: 64, memoryGb: 256 } }
+        clouds: ['unrelated-cloud'], region: 'legacy-region', type: 'too-small', vertical: { min: { vCPU: 64, memoryGb: 256 } }
     } });
     await handler.createServer(cluster);
     const [record] = inventory.values();
     assert.equal(record.cloud, 'cloud-api');
-    assert.equal(record.infrastructure.region, 'example-region');
-    assert.equal(record.infrastructure.vmType, 'suitable');
+    assert.equal(record.deployment.region, 'example-region');
+    assert.equal(record.deployment.type, 'suitable');
 });
 
 test('creation retains its existing two-minute startup observation', async t => {

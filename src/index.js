@@ -35,21 +35,19 @@ import Usage from '@cocreate/usage';
 
 import { ObjectId, getClientInfo } from '@cocreate/utils';
 
-import getInfrastructure from './getInfrastructure.js';
+import getDeployment from './getDeployment.js';
 import Manager from './manager.js';
-import Fetch from './Fetch.js';
-import http from './HTTP.js';
+import Fetch from './fetch.js';
+import http from './http.js';
 import IPC from './ipc.js';
 import Storage from './storage.js';
 import State from './state.js';
 import Log from './log.js';
-import Routing from './routing.js';
 import ApiKey from './apikey.js';
 import Repository from './repository/index.js';
 import Workers from './workers.js';
 
 export { Workers as ClusterManager } from './workers.js';
-export { setupHost } from './startup.js';
 
 /**
  * CoCreateServer orchestrates socket handling, API endpoint dispatching,
@@ -166,47 +164,42 @@ export class CoCreateServer {
         this.authenticate = authenticate.init(this);
         this.api = await ApiServer.init(this);
         this.workflow = await Workflow.init(this);
-        this.manager = await Manager.init(this);
+        await Manager.init(this);
         if (!this.isPrimary) await this.cluster.init(this);
 
         if (this.isPrimary) {
             console.log(`[@cocreate/cluster] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);
-            this.location = await getClientInfo();
-            this.ip = this.location.ip;
-            this.infrastructure = await getInfrastructure(this.id);
-            await this.cluster.init(this);
+            const response = await this.crud.send({
+                method: 'object.read', array: 'servers',
+                filter: { query: { _id: this.id }, limit: 1 },
+                organization_id: this.organization_id, host: this.host
+            });
+            if (!response || response.success === false ||
+                (Array.isArray(response.error) ? response.error.length : response.error) ||
+                !Array.isArray(response.object)) {
+                throw new Error('Unable to read the saved server deployment.');
+            }
+            const persistedServer = response.object[0];
+            const location = await getClientInfo();
+            this.ip = location.ip;
+            this.deployment = await getDeployment(this.id, {
+                ...persistedServer?.deployment,
+                ...this.deployment,
+                location: { ...persistedServer?.deployment?.location, ...location }
+            });
             this.autoscaler = await ServerAutoscaler.init(this);
+            await this.cluster.init(this);
 
             // Reset logs array for a fresh logging session on master startup
             await this.crud.send(this.state.getServerObject({ logs: [] }));
 
             // Replace the persisted worker profile before the new workers start.
-            let persistedServer;
-
-            try {
-                const response = await this.crud.send({
-                    method: 'object.read',
-                    array: 'servers',
-                    filter: { query: { _id: this.id }, limit: 1 },
-                    organization_id: this.organization_id,
-                    host: this.host
-                });
-                if (response?.error?.length || (response?.error && !Array.isArray(response.error)) ||
-                    !Array.isArray(response?.object))
-                    throw new Error('Unable to read the previous worker profile.');
-
-                persistedServer = response.object[0];
-            } catch (error) {
-                console.warn('[@cocreate/cluster] Could not clear unused worker fields:', error);
-            }
-
             const initialWorkerStates = this.workers.initialState(persistedServer);
             const workerResponse = await this.crud.send(this.state.getServerObject(initialWorkerStates));
             if (workerResponse?.error?.length || (workerResponse?.error && !Array.isArray(workerResponse.error)))
                 console.warn('[@cocreate/cluster] Could not update the worker profile:', workerResponse.error);
             await this.state.save('running');
 
-            this.routing = await Routing.init(this);
             this.repository = await Repository.init(this);
 
             if (await this.workers.setupMasterCluster()) {
@@ -230,46 +223,28 @@ export class CoCreateServer {
                 this.ip = process.env.SERVER_IP || (await getClientInfo()).ip;
             }
 
-            if (!this.infrastructure) {
+            if (!this.deployment) {
                 try {
-                    this.infrastructure = process.env.SERVER_INFRASTRUCTURE
-                        ? JSON.parse(process.env.SERVER_INFRASTRUCTURE)
-                        : await getInfrastructure(this.id);
+                    this.deployment = process.env.SERVER_DEPLOYMENT
+                        ? JSON.parse(process.env.SERVER_DEPLOYMENT)
+                        : await getDeployment(this.id);
                 } catch (error) {
-                    this.infrastructure = await getInfrastructure(this.id);
+                    this.deployment = await getDeployment(this.id);
                 }
             }
-
-            if (!this.location) {
-                try {
-                    this.location = process.env.SERVER_LOCATION
-                        ? JSON.parse(process.env.SERVER_LOCATION)
-                        : await getClientInfo(this.id);
-                } catch (error) {
-                    this.location = await getClientInfo(this.id);
-                }
+            if (!this.deployment.location) {
+                this.deployment.location = await getClientInfo(this.id);
             }
 
             // Initialize certificates module on worker
             this.tls = await TLS.init(this);
 
-            this.socket = new SocketServer(this);
             this.files = await FileServer.init(this);
             await http.init(this);
+            this.socket = new SocketServer(this);
 
             // Publish worker active running state object to DB upon creation/startup
             await this.state.save('running');
-        }
-
-        if (this.isPrimary && this.routing) {
-            await Promise.all([this.http, this.https].map(listener => listener.listening
-                ? Promise.resolve()
-                : new Promise(resolve => listener.once('listening', resolve))));
-            try {
-                await this.routing.add();
-            } catch (error) {
-                console.error('[@cocreate/cluster] Failed to register node routing:', error.message);
-            }
         }
 
         if (this.isPrimary) {

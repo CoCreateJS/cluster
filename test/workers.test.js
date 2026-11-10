@@ -22,14 +22,14 @@ function setup(t, count = 2) {
         return worker;
     });
     const server = {
-        id: 'node-1', ip: '192.0.2.1', infrastructure: { region: 'example' }, location: { country: 'US' },
+        id: 'node-1', ip: '192.0.2.1', deployment: { region: 'example', location: { country: 'US' }, cloud: 'cloud-api', dns: [] },
         manager: { organization_id: 'parent', host: 'parent.test', apiKey: 'test-only' },
         state: {
             evaluateMasterFallback: () => calls.push('fallback'),
             save: async status => calls.push(status), getServerObject: object => object
         },
         crud: { send: async request => calls.push(request) },
-        routing: { add: async () => calls.push('routing') }, repository: { publish: async () => calls.push('repository') }
+        repository: { publish: async () => calls.push('repository') }
     };
     const workers = new Workers(server);
     server.workers = workers;
@@ -68,7 +68,7 @@ test('startup configuration stays private and does not pretend planned workers a
 });
 
 test('single-process identity stays separate from live child count', t => {
-    const { workers, server } = setup(t, 1);
+    const { workers, server } = setup(t, 0);
     assert.equal(workers.workerId, 1);
     assert.equal(server.workerId, 1);
     assert.equal(server.isWorker, true);
@@ -83,8 +83,7 @@ test('add passes custom environment options while preserving runtime bootstrap i
     assert.equal(record.id, 1);
     assert.deepEqual(forks[0].env, {
         FEATURE: 'enabled', WORKER_ID: '1', SERVER_ID: server.id, SERVER_IP: server.ip,
-        SERVER_INFRASTRUCTURE: JSON.stringify(server.infrastructure), SERVER_LOCATION: JSON.stringify(server.location),
-        SERVER_MANAGER: JSON.stringify(server.manager)
+        SERVER_DEPLOYMENT: JSON.stringify(server.deployment)
     });
 });
 

@@ -105,8 +105,6 @@ export class Workers extends Map {
                     [...this.values()].every((item) => item.isListening);
                 if (workersReady && this.server.state?.save) {
                     this.server.state.save('running').then(async () => {
-                        try { await this.server.routing?.add(); }
-                        catch { console.error('[@cocreate/cluster] Failed to register node routing.'); }
                         await this.server.repository?.publish();
                     }).catch((error) => {
                         console.error(
@@ -252,8 +250,7 @@ export class Workers extends Map {
             WORKER_ID: String(workerId),
             SERVER_ID: String(this.server.id || ''),
             SERVER_IP: String(this.server.ip || '127.0.0.1'),
-            SERVER_INFRASTRUCTURE: JSON.stringify(this.server.infrastructure || {}),
-            SERVER_LOCATION: JSON.stringify(this.server.location || {}),
+            SERVER_DEPLOYMENT: JSON.stringify(this.server.deployment || {}),
         });
         worker.on('error', error => {
             console.error(`[@cocreate/cluster] [MASTER] Error on Worker ${workerId}:`, error.message);

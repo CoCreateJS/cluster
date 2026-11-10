@@ -51,7 +51,7 @@ async function setup(t, options = {}) {
     server.api = { ...await initApi(server), send: async request => {
         calls.push(request);
         if (options.beforeResponse) await options.beforeResponse(server);
-        return options.providerResult ?? { data: { instanceId: 'i-test' } };
+        return options.providerResult ?? { data: { id: 'i-test' } };
     } };
     server.manager = await initManager(server);
     return { server, logs, reads, calls, records };

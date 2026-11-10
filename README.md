@@ -84,7 +84,7 @@ When every worker enters draining or cordoned mode, the Primary process automati
 | `index.js` | Primary server orchestrator |
 | `ipc.js` | Inter-process communication engine |
 | `storage.js` | Cluster-wide reactive storage |
-| `getInfrastructure.js` | Infrastructure detection |
+| `getDeployment.js` | Infrastructure detection |
 | `getIp.js` | Public and private IP resolution |
 
 ---
@@ -111,22 +111,29 @@ The server composes multiple standalone CoCreate modules into a unified runtime.
 
 ### Built-in server manager
 
-Cluster resolves `server.manager` from `config.get('manager')` after CRUD. When
+Cluster resolves the manager organization ID, host, and API key through
+`config.get('manager')` after CRUD. It takes a frozen snapshot of that config
+and freezes the outbound connection after attaching its `send()` method. Later
+config changes do not alter the active connection; `send()` remains callable. When
 the configured manager organization matches this server's organization, this is
-the manager host: it exposes the local `server.managerService` but has no
-upstream `server.manager` connection. Other servers get an outbound connection
+the manager host and has no upstream `server.manager` connection. Other servers get an outbound connection
 whose fields come from config, not server inventory. `send` POSTs to the manager
 over `server.fetch`; manager credentials are not read from or persisted to the
 servers collection.
 
 ```js
-if (server.manager.organization_id) {
+if (server.manager?.organization_id) {
     await server.manager.send(existingEnvelope);
 }
 ```
 
 `send` POSTs the envelope to `https://<manager.host>/`, with the credential in the
-Authorization Bearer header and caller scope removed from JSON. The central Cluster
+Authorization Bearer header. It stamps `organization_id` with the platform ID
+and `managedOrganization` with the sending server's tenant organization ID,
+overriding caller-supplied values directly on the disposable payload. The body API
+key is removed; transport routing fields remain intact. The destination URL supplies
+the HTTP Host header, and the receiver derives the authoritative envelope host from it.
+The central Cluster
 HTTP handler resolves organization scope, authorizes the payload, and dispatches it
 to API, CRUD, workflow, or a registered server event. Manager has no inbound HTTP
 handler; its `server.manager` connection only sends requests.
@@ -139,9 +146,11 @@ delivery queue or replay, and direct CRUD writes outside this path are not captu
 Telemetry is not mirrored.
 
 AutoScaler uses manager.send at its existing send points and preserves its drain,
-capacity and recovery sequence. Unmanaged nodes retain server.api.send. Initial
-server creation persists the manager credential in both inventory copies; future
-scale-out reservations copy its connection fields. Cluster-key permissions allow
+capacity and recovery sequence. Unmanaged scaling uses server.workflow.run; both operations target parent workflows. Initial
+server creation passes the manager credential through the private startup
+bootstrap configuration. The bootstrap includes
+the platform organization ID, platform host, and managed API key; neither the
+credential nor manager connection fields are copied into server inventory. Cluster-key permissions allow
 instance endpoints and server/cluster updates. Cluster/provider AST predicates, metadata
 preparation, bootstrap handling and initial provider-result synchronization remain
 separate work; this service does not imply those integrations are complete.
@@ -201,73 +210,14 @@ server from starting; credentials are never logged by the handler.
 Cloud startup data contains node identity, host, and bootstrap storage, but no
 CoCreate API key. The runtime obtains that key after storage is available.
 
-### Node routing workflows
+### Workflow-owned server DNS
 
-Cluster's `src/routing.js` loads routing configuration after CRUD, workflows,
-and the node identity are initialized. The primary invokes `configure-cluster-routing` after
-startup readiness (all workers listening in clustered mode; HTTP and HTTPS
-listening in single-process mode). Workers do not register independently.
-
-That initialization workflow registers the node and returns a prepared removal
-request, retained in memory by `routing.js`. The existing coordinated shutdown
-path sends that request directly through `server.api.send` before stopping
-workers or closing Mesh. There is no removal workflow. This includes the
-existing `SIGINT`, `SIGTERM`, and
-`SIGBREAK` handling and application restart/reboot/shutdown paths. Routing does
-not install another set of process signal handlers. Workflow failures are
-logged without preventing the existing lifecycle from continuing.
-
-The initialization workflow name can be set in CoCreate configuration:
-
-```json
-{
-  "routing": {
-    "enabled": true,
-    "workflow": "configure-cluster-routing"
-  }
-}
-```
-
-Matching `servers_config` records with `type: "routing"` override this system
-configuration using the existing server/cluster scope rules. Their `config`
-object accepts `enabled` and `workflow`; set
-`enabled: false` in that object to disable the hooks.
-
-Each invocation uses the node's configured organization and host and the normal
-workflow envelope, for example:
-
-```js
-{
-  method: 'workflow.configure-cluster-routing',
-  organization_id: server.organization_id,
-  host: server.host,
-  'configure-cluster-routing': [{
-    server_id: server.id,
-    cluster_id: server.cluster_id,
-    ip: server.ip,
-    host: server.host,
-    infrastructure: server.infrastructure,
-    location: server.location
-  }]
-}
-```
-
-The workflow returns `configure-cluster-routing[0].remove`, an API request containing
-`api`, `endpoint`, and `data`, including provider registration IDs. A custom
-initialization workflow returns the same `remove` field under its own input
-key. Shutdown adds a `reason`, such as `SIGTERM`, and uses the node's configured
-organization and host for API execution. If no removal request was prepared,
-shutdown performs no new workflow or inventory lookup.
-
-The hooks do not create workflow definitions or contain Bunny API logic. The
-initialization workflow owns provider selection and request preparation. It
-must return nonsecret cleanup data, not API credentials. The existing API
-dispatcher still resolves the provider configuration and endpoint by name;
-this change does not introduce a shared API cache.
-
-Registration is shared across repeated readiness notifications, and withdrawal
-waits for an in-flight registration before running. Cleanup requires a graceful
-shutdown; abrupt process or host failure remains a routing fallback concern.
+The selected POPs are stored as the `deployment.dns` array on server inventory, alongside
+`deployment.id` and `deployment.type`. Cluster boot, worker readiness, and
+shutdown do not register or withdraw provider DNS. Provider registration and
+removal belong in the parent server creation/deletion workflows. The current
+creation workflow persists DNS selections; provider registration/removal wiring
+remains a separate step.
 
 Every server instance extends Node.js `EventEmitter`.
 
@@ -890,30 +840,22 @@ organization git metadata is performed.
 
 ## Platform organization activation
 
-Manager exposes `server.managerService` methods for local HTTP handling and
-platform provisioning. The optional outbound connection lives at `server.manager`
-and is resolved from `config.get('manager')`. The config `enabled` flag controls
-the platform's optional creation hook; tenant signup does not copy that platform setting.
+Manager is a transport helper. Its frozen `server.manager` connection comes from
+`config.get('manager')` and contains platform organization ID, host, API key and `send`.
+`send` posts a standard envelope to the platform root, sets the platform organization
+on the payload, adds the local tenant as `managedOrganization`, and returns the received JSON
+response. HTTP failures reject with the parsed response attached. Manager does not evaluate
+AST, prepare startup scripts, or reserve server inventory.
 
-On activation, Mesh emits `organizationPeers` after its peer lookup. The platform
-Manager listens for an empty peer list and looks up the organization cluster by
-`managedOrganization`; manager identity is resolved from runtime config. It
-then calls the platform-local `managerService.createServer(cluster)`. Nonrunning
-inventory, including failed records, does not block creation or get deleted by
-this decision.
+Platform activation lives in AutoScaler. It subscribes to `organizationPeers` before
+Mesh initialization, reads the target organization's saved cluster on an empty result,
+and calls `scaleOut(cluster)` without calculating placement. Telemetry still calls
+`scaleOut(clientLocations)` to calculate a new deployment. Both creation paths and
+scale-in use the same workflow dispatch helper; the separate provisioning service is removed.
 
-Manager executes initial server creation without inventory eligibility queries,
-reservations or creation deduplication. It uses the supplied cluster.initialDeployment,
-provider profile, storage reference, hostname and runtime settings, resolving the tenant
-bootstrap source using `managedOrganization` for script preparation. Cluster.name is an
-editable label; the cluster stores no manager identity. `managedOrganization`,
-initialDeployment and repositories remain top-level cluster configuration. Manager
-creates platform and tenant inventory before dispatching the `createOrganizationServer`
-workflow, mirrors the provider patch, and retains the existing startup watchdog.
-
-Tenant AutoScaler requests use `server.manager.send` to post their API or CRUD envelopes
-to the platform root. The central HTTP transport scopes, authorizes and dispatches those
-payloads directly. Manager has no inbound HTTP handler.
+AutoScaler selects its own deployment and invokes the same workflow through local
+`server.workflow.run` or upstream `server.manager.send`. The central HTTP transport
+scopes, authorizes and dispatches that envelope. Manager has no inbound HTTP handler.
 
 
 ## Mesh peer connection and close contract
@@ -924,7 +866,12 @@ Outgoing sockets retry from their `close` handler. Normal close code 1000 now su
 
 ### Managed node startup confirmation
 
-Manager observes first-node creation and managed create-instance requests for two minutes after a successful instance-ID response. A matching authorized server update must persist successfully to confirm receipt. An early update arriving before the provider response is retained; an update handled by another managing worker/node is checked through persisted server status at timeout. Missing confirmation logs the server ID and leaves a TODO for platform notification and at most one optional replacement. No restart, deletion, retry or notification service is implemented by this watchdog. Timers are process-local and unreferenced; they do not survive a managing-process restart.
+AutoScaler checks persisted server readiness after peer-triggered activation two minutes after a
+successful instance-ID response. A report handled by another worker/node is visible through
+that read. Missing confirmation logs the server ID. No automatic replacement, deletion or
+notification is implemented. Timers are local and unreferenced; direct workflow/AutoScaler
+invocations do not register this activation-only watchdog.
+
 
 ### Accepted termination retains lifecycle records
 

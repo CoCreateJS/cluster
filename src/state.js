@@ -225,8 +225,7 @@ export async function save(overrideStatus) {
             host: server.host,
             status: (server.state?.status || 'RUNNING').toLowerCase(), // OS level status: 'running', 'rebooting', 'stopped'
             totalWorkers: server.workers.size,
-            infrastructure: server.infrastructure,
-            location: server.location,
+            deployment: server.deployment,
             master: isPrimaryStopped ? {
                 pid: null,
                 status: 'stopped'
@@ -536,13 +535,6 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
         } else if (reason === 'OS_REBOOT') {
             server.state.status = 'REBOOTING';
         }
-    }
-
-    // Run node-owned routing cleanup while CRUD/API services are still available.
-    try {
-        await server.routing?.remove(reason);
-    } catch (error) {
-        console.error('[@cocreate/cluster] Failed to withdraw node routing:', error.message);
     }
 
     // Publish stopped state unless the server already has a failed/terminating outcome.
