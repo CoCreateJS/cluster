@@ -688,3 +688,26 @@ test('receiving IPC traffic does not stamp the receiving node or worker as its o
     assert.equal('workerId' in reply, false);
     assert.equal('clusterId' in reply, false);
 });
+
+test('CRUD distribution targets only registered workers and returns reads only to the requester', async t => {
+    const { addDistribution } = await import('@cocreate/utils/distribution');
+    const received = [], forwarded = [], local = [];
+    const server = { id: 'node', workerId: null, isPrimary: true,
+        workers: new Map([1, 2, 3].map(id => [id, createWorker(id, received)])),
+        organizationWorkers: new Map([['org', new Set([1, 2, 3])]]),
+        cluster: { send: data => forwarded.push(data) }, emit() {},
+        emitAsync: async (_, data) => { local.push(data); return data; } };
+    server.workers.distribution = new Map();
+    addDistribution(server.workers.distribution, ['document-a'], 1);
+    addDistribution(server.workers.distribution, ['document-a'], 2);
+    const send = initIPC(server, new Map());
+    await send({ method: 'object.update', organization_id: 'org', serverId: 'node', workerId: 1,
+        distributionKeys: ['document-a'], object: [{ _id: 'a', $set: { value: 2 } }] });
+    assert.deepEqual(received.map(item => item.id), [2]);
+    assert.equal(received[0].payload.object[0].$set.value, 2);
+    assert.equal(forwarded.length, 0, 'DB handles node propagation separately');
+    received.length = 0;
+    await send({ method: 'object.read', organization_id: 'org', serverId: 'node', workerId: 1,
+        distributionKeys: ['document-a'], object: [{ _id: 'a', value: 2 }] });
+    assert.equal(received.length, 0);
+});

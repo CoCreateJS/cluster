@@ -46,6 +46,7 @@ export class Workers extends Map {
         this.server = server;
         this.isPrimary = cluster.isPrimary;
         this.pendingPromises = new Map();
+        this.distribution = new Map();
         this.workerId = this.isPrimary ? null : (parseInt(process.env.WORKER_ID, 10) || 1);
     }
 

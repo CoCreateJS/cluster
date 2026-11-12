@@ -27,6 +27,7 @@ export class ServerMeshInbound {
             if (!key.startsWith(`${organization_id}:`)) continue;
             clearTimeout(timer);
             this.reconnectTimers.delete(key);
+            this.mesh.discardMessageQueue(socket, 'organization closed');
             this.mesh.removeSocketFromAllOrgServers(socket);
         }
     }
@@ -157,8 +158,10 @@ export class ServerMeshInbound {
             });
 
             ws.on('close', code => {
+                if (this.mesh.activeConnections.get(connectionKey) !== ws) return;
                 console.log(`[@cocreate/server-mesh/inbound] Inbound peer connection ${identifier} dropped.`);
                 if (this.mesh.isClosed || ws.intentionalClose || code === 1000) {
+                    this.mesh.discardMessageQueue(ws, 'connection closed');
                     this.mesh.removeSocketFromAllOrgServers(ws);
                     return;
                 }
@@ -166,6 +169,7 @@ export class ServerMeshInbound {
                 // or that recovery window expires, without starting a second dialer.
                 const timer = setTimeout(() => {
                     this.reconnectTimers.delete(connectionKey);
+                    void this.mesh.peerUnavailable(ws, { reason: 'reconnect window expired', recoveryWaitMs: this.mesh.outboundManager.reconnectWaitMs, closeCode: code });
                     this.mesh.removeSocketFromAllOrgServers(ws);
                 }, this.mesh.outboundManager.reconnectWaitMs);
                 this.reconnectTimers.set(connectionKey, { timer, socket: ws });
@@ -184,6 +188,7 @@ export class ServerMeshInbound {
             }
             this.mesh.activeConnections.set(connectionKey, ws);
             ws.isControlSocket = !organization_id;
+            this.mesh.flushMessageQueue(ws);
             if (ws.isControlSocket) this.mesh.syncOrganizations(ws);
         });
     }

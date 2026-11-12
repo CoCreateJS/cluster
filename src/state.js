@@ -214,7 +214,10 @@ export async function save(overrideStatus) {
             (Array.isArray(current.error) ? current.error.length : current.error)) {
             throw new Error('Unable to read server status before saving state.');
         }
-        if (['failed', 'terminating'].includes(current.object?.[0]?.master?.status)) return;
+        const master = current.object?.[0]?.master;
+        const recoveringMeshFailure = master?.status === 'failed' && master.failure?.source === 'mesh' &&
+            server.isPrimary && !server.state?.isShuttingDown && (!overrideStatus || overrideStatus === 'running');
+        if (master?.status === 'terminating' || (master?.status === 'failed' && !recoveringMeshFailure)) return;
     }
     if (server?.isPrimary) {
         const masterStatus = overrideStatus || (server.state?.isShuttingDown ? 'stopped' : 'running');

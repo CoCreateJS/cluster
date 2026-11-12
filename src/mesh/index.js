@@ -36,6 +36,8 @@ export class ServerMesh extends EventEmitter {
         // Shared Connection & Multi-tenant Routing Tables
         this.activeConnections = new Map(); // organization_id/serverId -> Network Socket
         this.controlSockets = [];
+        this.pendingPeerFailures = new Map(); // retained until the workflow confirms persistence
+        this.messageQueues = new Map(); // transport scope/server ID -> serialized FIFO
         this.organizations = new Map();     // organization_id -> Network Socket[]
 
         this.isClosed = false;
@@ -93,6 +95,7 @@ export class ServerMesh extends EventEmitter {
         this.organizations.delete(organization_id);
         for (const ws of sockets) {
             if (ws.isControlSocket) continue;
+            this.discardMessageQueue(ws, 'organization closed');
             ws.intentionalClose = true;
             for (const [key, socket] of this.activeConnections) {
                 if (socket === ws) this.activeConnections.delete(key);
@@ -407,15 +410,115 @@ export class ServerMesh extends EventEmitter {
         const targetSockets = Array.isArray(sockets) ? sockets : [sockets];
         const dataStr = typeof data === 'string' ? data : JSON.stringify(data);
 
+        if (this.isClosed) return;
+        const peers = new Set();
         for (const socket of targetSockets) {
-            try {
-                // 1 corresponds to OPEN state in WebSocket standard protocol implementations
-                if (socket && socket.readyState === 1) {
-                    socket.send(dataStr);
+            if (!socket) continue;
+            const key = this.messageQueueKey(socket);
+            if (key !== undefined && peers.has(key)) continue;
+            peers.add(key);
+            // Anonymous sockets cannot survive replacement, but can still send directly.
+            if (key === undefined) {
+                try {
+                    if (socket.readyState === 1) socket.send(dataStr);
+                } catch (err) {
+                    console.error('[@cocreate/server-mesh] Anonymous socket send failed:', err.message);
                 }
-            } catch (err) {
-                console.error(`[@cocreate/server-mesh] Error executing socketSend transaction:`, err.message);
+                continue;
             }
+            let queue = this.messageQueues.get(key);
+            if (!queue) this.messageQueues.set(key, queue = []);
+            queue.push(dataStr);
+            this.flushMessageQueue(socket);
+        }
+    }
+
+    messageQueueKey(socket) {
+        if (!socket?.serverId) return undefined;
+        return JSON.stringify([socket.isControlSocket ? 'control' : socket.organization_id || 'control', socket.serverId]);
+    }
+
+    flushMessageQueue(socket) {
+        const key = this.messageQueueKey(socket);
+        const queue = this.messageQueues.get(key);
+        if (!queue || socket.readyState !== 1) return;
+        let sent = 0;
+        try {
+            while (sent < queue.length && socket.readyState === 1) {
+                socket.send(queue[sent]);
+                sent++;
+            }
+        } catch (err) {
+            console.error('[@cocreate/server-mesh] Message retained after send failure:', socket.serverId, err.message);
+        }
+        if (sent === queue.length) this.messageQueues.delete(key);
+        else if (sent) queue.splice(0, sent);
+    }
+
+    async peerUnavailable(socket, details) {
+        const key = this.messageQueueKey(socket);
+        const queuedMessages = (this.messageQueues.get(key) || []).map(data => {
+            try { return JSON.parse(data); } catch { return data; }
+        });
+        this.messageQueues.delete(key);
+        const report = {
+            id: crypto.randomUUID(),
+            serverId: socket.serverId,
+            observerId: this.server.id,
+            peerOrganizationId: socket.isControlSocket ? null : socket.organization_id,
+            remoteAddress: socket.remoteAddress || null,
+            retries: null,
+            recoveryWaitMs: null,
+            closeCode: null,
+            observedAt: new Date().toISOString(),
+            ...details,
+            queuedMessages,
+            peerReachable: [...this.activeConnections.values()].some(peer => peer !== socket && peer.serverId === socket.serverId && peer.readyState === 1)
+        };
+        this.pendingPeerFailures.set(report.id, report);
+        // Observers are optional; persistence is independent of event listeners.
+        try { this.server.emit?.('peerUnavailable', structuredClone(report)); }
+        catch (error) {
+            console.error('[@cocreate/server-mesh] peerUnavailable listener failed:', error.message);
+        }
+        return this.persistPeerFailure(report);
+    }
+
+    async persistPeerFailure(report) {
+        try {
+            if (!this.server.workflow?.run) throw new Error('Workflow service is unavailable.');
+            const result = await this.server.workflow.run({
+                method: 'workflow.peerUnavailable',
+                organization_id: this.server.organization_id,
+                host: this.server.host,
+                peerUnavailable: [{ ...structuredClone(report),
+                    peerReachable: [...this.activeConnections.values()].some(peer => peer.serverId === report.serverId && peer.readyState === 1)
+                }]
+            }, { internal: true });
+            if (!result || result.success === false ||
+                (Array.isArray(result.error) ? result.error.length : result.error)) {
+                throw new Error('peerUnavailable workflow did not confirm persistence.');
+            }
+            this.pendingPeerFailures.delete(report.id);
+            return true;
+        } catch (error) {
+            console.error('[@cocreate/server-mesh] Peer failure report retained in memory:', {
+                serverId: report.serverId, id: report.id, length: report.queuedMessages.length,
+                error: error.message
+            });
+            return false;
+        }
+    }
+
+    discardMessageQueue(socket, reason) {
+        const key = this.messageQueueKey(socket);
+        const queue = this.messageQueues.get(key);
+        this.messageQueues.delete(key);
+        if (queue?.length) {
+            console.warn('[@cocreate/server-mesh] Discarded pending messages:', {
+                serverId: socket.serverId, organization_id: socket.isControlSocket ? undefined : socket.organization_id,
+                length: queue.length, reason
+            });
         }
     }
 
@@ -480,6 +583,7 @@ export class ServerMesh extends EventEmitter {
             }
         }
         this.activeConnections.clear();
+        this.messageQueues.clear();
 
         if (this.inboundManager) {
             await this.inboundManager.close();

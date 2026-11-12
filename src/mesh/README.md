@@ -44,6 +44,7 @@ IPC handles local worker routing. Server mesh handles only connections and messa
 - **Message Identity:** Preserves an existing `uuid` and creates one for payloads sent through `ServerMesh.send()` when absent.
 - **Tenant Isolation:** Tracks tenant-to-server membership so messages are only delivered to nodes actively serving an organization. Local worker membership is owned by `@cocreate/cluster` IPC.
 - **Connection Recovery:** Unexpected network disconnects retry automatically; intentional organization shutdowns do not reconnect.
+- **Reconnect Message Queue:** Messages for known peers that are connecting or disconnected remain in a primary-process memory FIFO keyed by transport scope and stable server ID. Replacement sockets flush pending messages in order. Intentional closure (code 1000), organization closure, and Mesh shutdown discard the affected queues. Retry exhaustion or inbound recovery expiry instead snapshots the queue, emits `peerUnavailable` on the server, and directly calls `server.workflow.run()` for `workflow.peerUnavailable`. No listener is registered for this event. Discards log the peer, queue length, and reason. Queues are not persisted across process restarts and do not provide remote processing acknowledgments; a successful socket send removes the message from the queue. Unknown peers with no routing reference are not queued.
 - **Cluster IPC Integration:** Transparently bridges Node.js Primary and Worker processes while extending communication across distributed servers.
 - **Control and Organization Sockets:** Uses pathless sockets for server control and `/<organization_id>` sockets for organization traffic.
 
@@ -407,3 +408,26 @@ For open-source projects and non-commercial use, this software is available unde
 ### Commercial
 
 Organizations requiring proprietary use may obtain a commercial license from CoCreate.
+
+### Unavailable peer workflow
+
+The `peerUnavailable` workflow receives an array containing one report with `serverId`,
+`observerId`, `observedAt`, connection scope, failure reason, and `queuedMessages`.
+Its invocation uses the observing server's organization and host; no CRUD status
+writes are performed by Mesh. The default workflow seed lives in CoCreate App at
+`src/apps/workflows/config/mesh.js` and must be published to that organization's
+`workflows` array through the normal configuration deployment.
+
+The workflow appends messages and observer evidence using `$addToSet`, then marks
+an eligible unreachable peer's `master.status` as `failed`, with a Mesh failure
+reason. It does not overwrite terminating, draining, or stopped statuses and does
+not terminate or delete nodes. Another open connection prevents marking the whole
+node failed. A primary's subsequent healthy state save can recover its own Mesh
+failure, while other failure outcomes remain protected. Persisted messages are
+inspection evidence; they are not automatically replayed.
+
+If the workflow is missing or returns an error, the report remains in
+`pendingPeerFailures` in memory. `persistPeerFailure(report)` can retry it; retries
+are not scheduled automatically. Successful persistence releases the snapshot.
+These snapshots do not survive process exit. Intentional closure never emits
+`peerUnavailable` or invokes this workflow.

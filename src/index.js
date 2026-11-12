@@ -46,7 +46,7 @@ import Log from './log.js';
 import ApiKey from './apikey.js';
 import Repository from './repository/index.js';
 import Workers from './workers.js';
-import { DB_PROVIDER, initializeServerDB } from '@cocreate/db';
+import { DB_PROVIDER, initializeServerDB, resolveDirectory } from '@cocreate/db';
 
 export { Workers as ClusterManager } from './workers.js';
 
@@ -153,14 +153,18 @@ export class CoCreateServer {
             this.id = process.env.SERVER_ID;
         }
 
-        this.DB = initializeServerDB(this);
+        // The primary owns the engine/cache; workers receive an awaitable IPC driver.
+        const dbDirectory = this.isPrimary ? await resolveDirectory({
+            directory: Config.get('db')?.directory ?? Config.get('crud')?.directory ?? Config.get('storage')?.directory
+        }) : undefined;
+        this.DB = initializeServerDB(this, { directory: dbDirectory });
 
         // Configure the local worker collection
         this.workers.configureWorkers(Config.get('workers'));
 
         // CRUD may query the platform organization while it initializes its
         // config. Register CoCreateDB first so those bootstrap reads can use
-        // the local database driver before crudServer.init() resolves.
+        // the registered database driver before crudServer.init() resolves.
         crudServer.registerDriver(DB_PROVIDER, this.DB);
         crudServer.registerDriver('db', this.DB);
         this.crud = await crudServer.init(this);

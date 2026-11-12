@@ -21,7 +21,24 @@ function createServer({ id, isPrimary, directory, send, clusterSend, peerTimeout
         return replies[0] ?? payload
     }
     server.send = send ?? (payload => server.emitAsync(payload.method, payload))
-    initializeServerDB(server, { directory, peerTimeoutMs })
+    initializeServerDB(server, { directory, peerTimeoutMs, writeBehind: false })
+    const scope = { organization_id: '000000000000000000000001', storage: 'production', storageId: '000000000000000000000099', database: 'app' }
+    const sendLocal = server.DB.send.bind(server.DB)
+    const ready = sendLocal({ ...scope, method: 'storage.create' })
+    server.DB.send = async payload => { await ready; return sendLocal({ ...scope, ...payload }) }
+    for (const method of ['updateDistribution', 'getDistribution', 'listDistribution', 'readLocalEntity', 'applyReplicatedObjectMutation']) {
+        if (!server.DB[method]) continue
+        const local = server.DB[method].bind(server.DB)
+        server.DB[method] = async payload => { await ready; return local({ ...scope, ...payload }) }
+    }
+    if (server.DB.index) {
+        for (const method of ['get', 'getMetadata', 'set', 'remove']) {
+            const local = server.DB.index[method].bind(server.DB.index)
+            server.DB.index[method] = async (...args) => { await ready; return local(scope, ...args) }
+        }
+        const scan = server.DB.index.scan.bind(server.DB.index)
+        server.DB.index.scan = async function* (...args) { await ready; yield* scan(scope, ...args) }
+    }
     return server
 }
 
@@ -32,7 +49,7 @@ test('server.DB broadcasts local availability transitions and applies remote eve
     try {
         const database = await server.DB.send({ method: 'database.create', database: 'events' })
         assert.equal(database.success, true, database.error)
-        const entityEvents = server.cluster.sent.filter(message => message.method === 'db.distributed')
+        const entityEvents = server.cluster.sent.filter(message => message.method === 'db.distribution')
         assert.equal(entityEvents.length, 1)
         assert.equal(entityEvents[0].operation, 'add')
         assert.equal(entityEvents[0].serverId, 'server-local')
@@ -51,8 +68,9 @@ test('server.DB broadcasts local availability transitions and applies remote eve
         const arrayId = array.array[0]._id
         const objectId = created.object[0]._id
         const remoteEvent = {
-            method: 'db.distributed',
+            method: 'db.distribution',
             serverId: 'server-peer',
+            scope: { organization_id: '000000000000000000000001', storage: 'production', storageId: '000000000000000000000099' },
             databaseId,
             arrayId,
             objectId,
@@ -66,10 +84,10 @@ test('server.DB broadcasts local availability transitions and applies remote eve
             incoming.push(response)
             return response
         }
-        server.cluster.emit('db.distributed', remoteEvent)
+        server.cluster.emit('db.distribution', remoteEvent)
         await Promise.all(incoming)
 
-        assert.deepEqual(await server.DB.getDistributed({ databaseId, arrayId, objectId }), [
+        assert.deepEqual(await server.DB.getDistribution({ databaseId, arrayId, objectId }), [
             'server-local', 'server-peer'
         ])
         assert.equal(server.cluster.sent.length, localBroadcastCount)
@@ -78,7 +96,7 @@ test('server.DB broadcasts local availability transitions and applies remote eve
     }
 })
 
-test('worker availability updates are serialized through the primary', async () => {
+test('worker CRUD executes on the primary and propagates availability once', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'cocreate-server-db-ipc-'))
     const parent = createServer({ id: 'server-local', isPrimary: true, directory })
 
@@ -98,10 +116,11 @@ test('worker availability updates are serialized through the primary', async () 
         const arrays = await parent.DB.send({ method: 'array.read', database: 'worker-db' })
         const arrayId = arrays.array[0]._id
 
-        assert.deepEqual(await parent.DB.getDistributed({
+        assert.deepEqual(await parent.DB.getDistribution({
             databaseId, arrayId, objectId: created.object[0]._id
         }), ['server-local'])
-        assert.equal(parent.cluster.sent.filter(message => message.method === 'db.distributed').length, 3)
+        assert.equal(parent.cluster.sent.filter(message => message.method === 'db.distribution').length, 3)
+        assert.equal(worker.cluster.sent.filter(message => message.method === 'db.distribution').length, 0)
     } finally {
         await rm(directory, { recursive: true, force: true })
     }
@@ -142,7 +161,7 @@ test('peer document requests target one node, correlate replies, and return comp
             { databaseId: database._id },
             { databaseId: database._id, arrayId: array._id },
             { databaseId: database._id, arrayId: array._id, objectId: object._id }
-        ]) await target.DB.updateDistributed({ ...entity, nodeId: source.id, operation: 'add' })
+        ]) await target.DB.updateDistribution({ ...entity, nodeId: source.id, operation: 'add' })
 
         const result = await target.DB.send({
             method: 'object.read',
@@ -181,7 +200,7 @@ test('unavailable peer fetches time out and leave the read as a normal miss', as
         const database = (await server.DB.send({ method: 'database.create', database: 'timeout-db' })).database[0]
         const array = (await server.DB.send({ method: 'array.create', database: 'timeout-db', array: 'items' })).array[0]
         const objectId = '000000000000000000000001'
-        await server.DB.updateDistributed({
+        await server.DB.updateDistribution({
             databaseId: database._id,
             arrayId: array._id,
             objectId,
@@ -207,9 +226,17 @@ test('unavailable peer fetches time out and leave the read as a normal miss', as
 test('index partitions are acquired from a peer, register holders, and propagate later mutations only to holders', async () => {
     const sourceDirectory = await mkdtemp(join(tmpdir(), 'cocreate-server-db-index-source-'))
     const targetDirectory = await mkdtemp(join(tmpdir(), 'cocreate-server-db-index-target-'))
+    const deliveries = new Set()
     const deliver = (from, to, payload) => {
-        if (payload.broadcast || payload.server === to.id)
-            queueMicrotask(() => to.cluster.emit(payload.method, payload))
+        if (!payload.broadcast && payload.server !== to.id) return
+        const task = Promise.resolve().then(() => Promise.all(
+            to.cluster.rawListeners(payload.method).map(listener => listener.call(to.cluster, payload))
+        ))
+        deliveries.add(task)
+        task.then(() => deliveries.delete(task), () => {})
+    }
+    const settleDeliveries = async () => {
+        while (deliveries.size) await Promise.all([...deliveries])
     }
     let source
     let target
@@ -232,11 +259,14 @@ test('index partitions are acquired from a peer, register holders, and propagate
         return values
     }
     const waitFor = async check => {
+        let lastError
         for (let attempt = 0; attempt < 100; attempt++) {
-            if (await check()) return
+            // Partition messages are independent; a polling cursor can observe
+            // an old reference after its leaf was removed and before its parent arrives.
+            try { if (await check()) return } catch (error) { lastError = error }
             await new Promise(resolve => setTimeout(resolve, 10))
         }
-        assert.fail('timed out waiting for partition synchronization')
+        assert.fail(`timed out waiting for partition synchronization${lastError ? ': ' + lastError.message : ''}`)
     }
 
     try {
@@ -249,7 +279,7 @@ test('index partitions are acquired from a peer, register holders, and propagate
         for (const entity of [
             { databaseId: database._id },
             { databaseId: database._id, arrayId: array._id }
-        ]) await target.DB.updateDistributed({ ...entity, nodeId: source.id, operation: 'add' })
+        ]) await target.DB.updateDistribution({ ...entity, nodeId: source.id, operation: 'add' })
 
         for (const { partitionId, nodeIds } of await source.DB.listPartitions())
             for (const nodeId of nodeIds)
@@ -263,7 +293,7 @@ test('index partitions are acquired from a peer, register holders, and propagate
         ])
 
         const partitionId = (await source.DB.listPartitions())
-            .find(({ partitionId }) => partitionId.endsWith('/index/index.json')).partitionId
+            .find(({ partitionId }) => partitionId.endsWith(`databases/${database._id}/arrays/${array._id}/index/index.json`)).partitionId
         await waitFor(async () => (await source.DB.getPartitionHolders(partitionId)).includes(target.id))
 
         const sentBeforeMutation = source.cluster.sent.length
@@ -277,8 +307,10 @@ test('index partitions are acquired from a peer, register holders, and propagate
             .filter(message => message.method === 'db.partition.update')
         assert.ok(updates.length > 0)
         assert.ok(updates.every(message => message.server === target.id))
-        await new Promise(resolve => setTimeout(resolve, 50))
+        await settleDeliveries()
+        assert.deepEqual(await collect(target.DB.index.scan(databaseName, arrayName, 'score', { type: 'number' })), [{ value: 9, objectId: 'object-1' }])
     } finally {
+        await settleDeliveries()
         await Promise.all([
             rm(sourceDirectory, { recursive: true, force: true }),
             rm(targetDirectory, { recursive: true, force: true })

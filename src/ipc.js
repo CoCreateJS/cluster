@@ -17,6 +17,7 @@
  ********************************************************************************/
 
 import cluster from 'node:cluster';
+import { getDistribution } from '@cocreate/utils/distribution';
 import { uuid } from '@cocreate/utils';
 
 const presenceEvents = ['orgConnected', 'orgDisconnected'];
@@ -91,14 +92,17 @@ export function init(server, pendingPromises) {
         const targetsOtherNodes = payload.server === undefined ||
             (Array.isArray(payload.server) ? payload.server : [payload.server])
                 .some(id => String(id) !== String(server.id));
-        if (payload.serverId === server.id && targetsOtherNodes &&
+        if (!Array.isArray(payload.distributionKeys) && payload.serverId === server.id && targetsOtherNodes &&
             (payload.organization_id || payload.server !== undefined || payload.cluster !== undefined)) {
             server.cluster.send(transportEnvelope(payload));
         }
 
+        const distributionTargets = Array.isArray(payload.distributionKeys)
+            ? getDistribution(server.workers.distribution, payload.distributionKeys) : undefined;
         const workers = targetsThisNode && !(payload.master === true && masterControls.includes(payload.method))
             ? [...server.workers.values()].filter(worker => {
                 if (!includesTarget(payload.worker, worker.id)) return false;
+                if (distributionTargets && (!/\.(create|update|delete)$/.test(payload.method) || !distributionTargets.has(worker.id))) return false;
                 if (organizationDelivery(payload)) {
                     return organizationWorkers.get(payload.organization_id)?.has(worker.id) &&
                         !(payload.serverId === server.id && payload.workerId === worker.id);

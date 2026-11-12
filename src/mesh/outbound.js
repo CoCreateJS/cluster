@@ -182,6 +182,7 @@ export class ServerMeshOutbound {
                 this.retryTimers.delete(connectionKey);
                 this.pruneTimers.delete(targetIp);
 
+                this.mesh.flushMessageQueue(clientSocket);
                 clientSocket.isPeer = true;
                 clientSocket.isControlSocket = !organization_id;
                 if (clientSocket.isControlSocket) {
@@ -191,9 +192,17 @@ export class ServerMeshOutbound {
             });
 
             clientSocket.on('close', (code) => {
+                if (this.mesh.activeConnections.get(connectionKey) !== clientSocket) return;
                 if (this.mesh.isClosed || clientSocket.intentionalClose || code === 1000 ||
                     (organization_id && !this.mesh.organizations.has(organization_id)) || retryCount >= maxRetries) {
                     this.retryTimers.delete(connectionKey);
+                    const exhausted = !this.mesh.isClosed && !clientSocket.intentionalClose && code !== 1000 &&
+                        (!organization_id || this.mesh.organizations.has(organization_id)) && retryCount >= maxRetries;
+                    if (exhausted) {
+                        void this.mesh.peerUnavailable(clientSocket, { reason: 'retries exhausted', retries: retryCount, closeCode: code });
+                    } else {
+                        this.mesh.discardMessageQueue(clientSocket, 'connection closed');
+                    }
                     this.mesh.removeSocketFromAllOrgServers(clientSocket);
                     return;
                 }

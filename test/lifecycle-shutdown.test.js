@@ -131,3 +131,22 @@ test('failed master checkpoint still completes shutdown', async t => {
     t.mock.timers.tick(1000);
     assert.equal(order.at(-1), 'exit');
 });
+
+
+test('the primary can recover its own Mesh failure without deleting missed-message evidence', async t => {
+    const { server } = await setup(t);
+    const writes = [];
+    server.crud.send = async request => {
+        if (request.method === 'object.read') return { object: [{
+            master: { status: 'failed', failure: { source: 'mesh' } }, queuedMessages: [{ uuid: 'missed' }]
+        }] };
+        writes.push(request);
+        return { object: [request.object] };
+    };
+    await server.state.save('running');
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].object.master.status, 'running');
+    assert.equal('queuedMessages' in writes[0].object, false);
+    await server.state.save('stopped');
+    assert.equal(writes.length, 1, 'shutdown cannot erase a failure');
+});
