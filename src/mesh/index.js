@@ -360,7 +360,7 @@ export class ServerMesh extends EventEmitter {
  * @private
  * @environment server
  */
-    send(payload) {
+    send(payload, encoded) {
         if (!payload || typeof payload !== 'object' || !payload.method) {
             console.error("[@cocreate/server-mesh] Cannot transmit mesh payload without a defined 'method' key.");
             return;
@@ -394,7 +394,7 @@ export class ServerMesh extends EventEmitter {
                 });
 
             const uniqueSockets = Array.from(new Set(targets));
-            this.socketSend(uniqueSockets, payload);
+            this.socketSend(uniqueSockets, payload, encoded);
         }
     }
 
@@ -406,9 +406,9 @@ export class ServerMesh extends EventEmitter {
  * @private
  * @environment server
  */
-    socketSend(sockets, data) {
+    socketSend(sockets, data, encoded) {
         const targetSockets = Array.isArray(sockets) ? sockets : [sockets];
-        const dataStr = typeof data === 'string' ? data : JSON.stringify(data);
+        const dataStr = encoded ?? (typeof data === 'string' ? data : JSON.stringify(data));
 
         if (this.isClosed) return;
         const peers = new Set();

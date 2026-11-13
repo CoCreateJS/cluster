@@ -23,31 +23,31 @@ function createServer({ id, isPrimary, directory, send, clusterSend, peerTimeout
     server.send = send ?? (payload => server.emitAsync(payload.method, payload))
     initializeServerDB(server, { directory, peerTimeoutMs, writeBehind: false })
     const scope = { organization_id: '000000000000000000000001', storage: 'production', storageId: '000000000000000000000099', database: 'app' }
-    const sendLocal = server.DB.send.bind(server.DB)
+    const sendLocal = server.db.send.bind(server.db)
     const ready = sendLocal({ ...scope, method: 'storage.create' })
-    server.DB.send = async payload => { await ready; return sendLocal({ ...scope, ...payload }) }
+    server.db.send = async payload => { await ready; return sendLocal({ ...scope, ...payload }) }
     for (const method of ['updateDistribution', 'getDistribution', 'listDistribution', 'readLocalEntity', 'applyReplicatedObjectMutation']) {
-        if (!server.DB[method]) continue
-        const local = server.DB[method].bind(server.DB)
-        server.DB[method] = async payload => { await ready; return local({ ...scope, ...payload }) }
+        if (!server.db[method]) continue
+        const local = server.db[method].bind(server.db)
+        server.db[method] = async payload => { await ready; return local({ ...scope, ...payload }) }
     }
-    if (server.DB.index) {
+    if (server.db.index) {
         for (const method of ['get', 'getMetadata', 'set', 'remove']) {
-            const local = server.DB.index[method].bind(server.DB.index)
-            server.DB.index[method] = async (...args) => { await ready; return local(scope, ...args) }
+            const local = server.db.index[method].bind(server.db.index)
+            server.db.index[method] = async (...args) => { await ready; return local(scope, ...args) }
         }
-        const scan = server.DB.index.scan.bind(server.DB.index)
-        server.DB.index.scan = async function* (...args) { await ready; yield* scan(scope, ...args) }
+        const scan = server.db.index.scan.bind(server.db.index)
+        server.db.index.scan = async function* (...args) { await ready; yield* scan(scope, ...args) }
     }
     return server
 }
 
-test('server.DB broadcasts local availability transitions and applies remote events without rebroadcast', async () => {
+test('server.db broadcasts local availability transitions and applies remote events without rebroadcast', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'cocreate-server-db-'))
     const server = createServer({ id: 'server-local', isPrimary: true, directory })
 
     try {
-        const database = await server.DB.send({ method: 'database.create', database: 'events' })
+        const database = await server.db.send({ method: 'database.create', database: 'events' })
         assert.equal(database.success, true, database.error)
         const entityEvents = server.cluster.sent.filter(message => message.method === 'db.distribution')
         assert.equal(entityEvents.length, 1)
@@ -56,9 +56,9 @@ test('server.DB broadcasts local availability transitions and applies remote eve
         assert.equal(entityEvents[0].workers, false)
         assert.ok(server.cluster.sent.some(message => message.method === 'db.partition.availability'))
 
-        const array = await server.DB.send({ method: 'array.create', database: 'events', array: 'items' })
+        const array = await server.db.send({ method: 'array.create', database: 'events', array: 'items' })
         assert.equal(array.success, true, array.error)
-        const created = await server.DB.send({
+        const created = await server.db.send({
             method: 'object.create', database: 'events', array: 'items', object: { value: 1 }
         })
         assert.equal(created.success, true, created.error)
@@ -87,7 +87,7 @@ test('server.DB broadcasts local availability transitions and applies remote eve
         server.cluster.emit('db.distribution', remoteEvent)
         await Promise.all(incoming)
 
-        assert.deepEqual(await server.DB.getDistribution({ databaseId, arrayId, objectId }), [
+        assert.deepEqual(await server.db.getDistribution({ databaseId, arrayId, objectId }), [
             'server-local', 'server-peer'
         ])
         assert.equal(server.cluster.sent.length, localBroadcastCount)
@@ -107,16 +107,16 @@ test('worker CRUD executes on the primary and propagates availability once', asy
             directory,
             send: payload => parent.emitAsync(payload.method, payload)
         })
-        const created = await worker.DB.send({
+        const created = await worker.db.send({
             method: 'object.create', database: 'worker-db', array: 'items', object: { value: 2 }
         })
         assert.equal(created.success, true, created.error)
-        const database = await parent.DB.send({ method: 'database.read' })
+        const database = await parent.db.send({ method: 'database.read' })
         const databaseId = database.database.find(item => item.name === 'worker-db')._id
-        const arrays = await parent.DB.send({ method: 'array.read', database: 'worker-db' })
+        const arrays = await parent.db.send({ method: 'array.read', database: 'worker-db' })
         const arrayId = arrays.array[0]._id
 
-        assert.deepEqual(await parent.DB.getDistribution({
+        assert.deepEqual(await parent.db.getDistribution({
             databaseId, arrayId, objectId: created.object[0]._id
         }), ['server-local'])
         assert.equal(parent.cluster.sent.filter(message => message.method === 'db.distribution').length, 3)
@@ -150,9 +150,9 @@ test('peer document requests target one node, correlate replies, and return comp
     })
 
     try {
-        const database = (await source.DB.send({ method: 'database.create', database: 'peer-db' })).database[0]
-        const array = (await source.DB.send({ method: 'array.create', database: 'peer-db', array: 'users' })).array[0]
-        const object = (await source.DB.send({
+        const database = (await source.db.send({ method: 'database.create', database: 'peer-db' })).database[0]
+        const array = (await source.db.send({ method: 'array.create', database: 'peer-db', array: 'users' })).array[0]
+        const object = (await source.db.send({
             method: 'object.create', database: 'peer-db', array: 'users',
             object: { name: 'Ada', secret: { token: 'complete' } }
         })).object[0]
@@ -161,9 +161,9 @@ test('peer document requests target one node, correlate replies, and return comp
             { databaseId: database._id },
             { databaseId: database._id, arrayId: array._id },
             { databaseId: database._id, arrayId: array._id, objectId: object._id }
-        ]) await target.DB.updateDistribution({ ...entity, nodeId: source.id, operation: 'add' })
+        ]) await target.db.updateDistribution({ ...entity, nodeId: source.id, operation: 'add' })
 
-        const result = await target.DB.send({
+        const result = await target.db.send({
             method: 'object.read',
             database: 'peer-db',
             array: 'users',
@@ -172,7 +172,7 @@ test('peer document requests target one node, correlate replies, and return comp
         })
         assert.equal(result.success, true, result.error)
         assert.equal(result.object[0].secret, undefined)
-        assert.deepEqual(await target.DB.readLocalEntity({
+        assert.deepEqual(await target.db.readLocalEntity({
             type: 'object', databaseId: database._id, arrayId: array._id, objectId: object._id
         }).then(record => record.secret), { token: 'complete' })
 
@@ -197,10 +197,10 @@ test('unavailable peer fetches time out and leave the read as a normal miss', as
     })
 
     try {
-        const database = (await server.DB.send({ method: 'database.create', database: 'timeout-db' })).database[0]
-        const array = (await server.DB.send({ method: 'array.create', database: 'timeout-db', array: 'items' })).array[0]
+        const database = (await server.db.send({ method: 'database.create', database: 'timeout-db' })).database[0]
+        const array = (await server.db.send({ method: 'array.create', database: 'timeout-db', array: 'items' })).array[0]
         const objectId = '000000000000000000000001'
-        await server.DB.updateDistribution({
+        await server.db.updateDistribution({
             databaseId: database._id,
             arrayId: array._id,
             objectId,
@@ -208,7 +208,7 @@ test('unavailable peer fetches time out and leave the read as a normal miss', as
             operation: 'add'
         })
 
-        const result = await server.DB.send({
+        const result = await server.db.send({
             method: 'object.read',
             database: 'timeout-db',
             array: 'items',
@@ -272,35 +272,35 @@ test('index partitions are acquired from a peer, register holders, and propagate
     try {
         const databaseName = 'partition-db'
         const arrayName = 'items'
-        const database = (await source.DB.send({ method: 'database.create', database: databaseName })).database[0]
-        const array = (await source.DB.send({ method: 'array.create', database: databaseName, array: arrayName })).array[0]
-        await source.DB.index.set(databaseName, arrayName, 'score', 4, 'object-1')
+        const database = (await source.db.send({ method: 'database.create', database: databaseName })).database[0]
+        const array = (await source.db.send({ method: 'array.create', database: databaseName, array: arrayName })).array[0]
+        await source.db.index.set(databaseName, arrayName, 'score', 4, 'object-1')
 
         for (const entity of [
             { databaseId: database._id },
             { databaseId: database._id, arrayId: array._id }
-        ]) await target.DB.updateDistribution({ ...entity, nodeId: source.id, operation: 'add' })
+        ]) await target.db.updateDistribution({ ...entity, nodeId: source.id, operation: 'add' })
 
-        for (const { partitionId, nodeIds } of await source.DB.listPartitions())
+        for (const { partitionId, nodeIds } of await source.db.listPartitions())
             for (const nodeId of nodeIds)
-                await target.DB.updatePartition({ partitionId, nodeId, operation: 'add' })
+                await target.db.updatePartition({ partitionId, nodeId, operation: 'add' })
 
-        await target.DB.send({ method: 'database.read' })
-        await target.DB.send({ method: 'array.read', database: databaseName })
+        await target.db.send({ method: 'database.read' })
+        await target.db.send({ method: 'array.read', database: databaseName })
 
-        assert.deepEqual(await collect(target.DB.index.scan(databaseName, arrayName, 'score', { type: 'number' })), [
+        assert.deepEqual(await collect(target.db.index.scan(databaseName, arrayName, 'score', { type: 'number' })), [
             { value: 4, objectId: 'object-1' }
         ])
 
-        const partitionId = (await source.DB.listPartitions())
+        const partitionId = (await source.db.listPartitions())
             .find(({ partitionId }) => partitionId.endsWith(`databases/${database._id}/arrays/${array._id}/index/index.json`)).partitionId
-        await waitFor(async () => (await source.DB.getPartitionHolders(partitionId)).includes(target.id))
+        await waitFor(async () => (await source.db.getPartitionHolders(partitionId)).includes(target.id))
 
         const sentBeforeMutation = source.cluster.sent.length
-        await source.DB.index.remove(databaseName, arrayName, 'score', 4, 'object-1')
-        await source.DB.index.set(databaseName, arrayName, 'score', 9, 'object-1')
+        await source.db.index.remove(databaseName, arrayName, 'score', 4, 'object-1')
+        await source.db.index.set(databaseName, arrayName, 'score', 9, 'object-1')
         await waitFor(async () => {
-            const entries = await collect(target.DB.index.scan(databaseName, arrayName, 'score', { type: 'number' }))
+            const entries = await collect(target.db.index.scan(databaseName, arrayName, 'score', { type: 'number' }))
             return entries.length === 1 && entries[0].value === 9
         })
         const updates = source.cluster.sent.slice(sentBeforeMutation)
@@ -308,7 +308,7 @@ test('index partitions are acquired from a peer, register holders, and propagate
         assert.ok(updates.length > 0)
         assert.ok(updates.every(message => message.server === target.id))
         await settleDeliveries()
-        assert.deepEqual(await collect(target.DB.index.scan(databaseName, arrayName, 'score', { type: 'number' })), [{ value: 9, objectId: 'object-1' }])
+        assert.deepEqual(await collect(target.db.index.scan(databaseName, arrayName, 'score', { type: 'number' })), [{ value: 9, objectId: 'object-1' }])
     } finally {
         await settleDeliveries()
         await Promise.all([
@@ -340,57 +340,57 @@ test('object create, update, and delete mutations follow index partition holders
     }
 
     try {
-        const database = (await source.DB.send({ method: 'database.create', database: 'replicated' })).database[0]
-        const array = (await source.DB.send({ method: 'array.create', database: 'replicated', array: 'items' })).array[0]
-        const created = await source.DB.send({
+        const database = (await source.db.send({ method: 'database.create', database: 'replicated' })).database[0]
+        const array = (await source.db.send({ method: 'array.create', database: 'replicated', array: 'items' })).array[0]
+        const created = await source.db.send({
             method: 'object.create', database: 'replicated', array: 'items', object: { name: 'Ada', score: 1 }
         })
         assert.equal(created.success, true, created.error)
         const object = created.object[0]
-        const partitions = (await source.DB.listPartitions()).filter(({ partitionId }) =>
+        const partitions = (await source.db.listPartitions()).filter(({ partitionId }) =>
             partitionId.includes(`databases/${database._id}/arrays/${array._id}/index/`))
-        assert.ok(partitions.length, JSON.stringify(await source.DB.listPartitions()))
+        assert.ok(partitions.length, JSON.stringify(await source.db.listPartitions()))
 
         const [databaseRecord, arrayRecord] = await Promise.all([
-            source.DB.readLocalEntity({ type: 'database', databaseId: database._id }),
-            source.DB.readLocalEntity({ type: 'array', databaseId: database._id, arrayId: array._id })
+            source.db.readLocalEntity({ type: 'database', databaseId: database._id }),
+            source.db.readLocalEntity({ type: 'array', databaseId: database._id, arrayId: array._id })
         ])
-        await target.DB.applyReplicatedObjectMutation({ operation: 'set', database: databaseRecord, array: arrayRecord, object })
+        await target.db.applyReplicatedObjectMutation({ operation: 'set', database: databaseRecord, array: arrayRecord, object })
         for (const { partitionId, nodeIds } of partitions) {
-            await target.DB.applyIndexPartition(partitionId, await source.DB.readIndexPartition(partitionId), { replicated: true })
+            await target.db.applyIndexPartition(partitionId, await source.db.readIndexPartition(partitionId), { replicated: true })
             for (const nodeId of nodeIds)
-                await target.DB.updatePartition({ partitionId, nodeId, operation: 'add' })
-            await source.DB.updatePartition({ partitionId, nodeId: target.id, operation: 'add' })
+                await target.db.updatePartition({ partitionId, nodeId, operation: 'add' })
+            await source.db.updatePartition({ partitionId, nodeId: target.id, operation: 'add' })
         }
 
-        const second = await source.DB.send({
+        const second = await source.db.send({
             method: 'object.create', database: 'replicated', array: 'items', object: { name: 'Ada', score: 1 }
         })
         assert.equal(second.success, true, second.error)
         const replicatedObject = second.object[0]
-        await waitFor(async () => (await target.DB.readLocalEntity({
+        await waitFor(async () => (await target.db.readLocalEntity({
             type: 'object', databaseId: database._id, arrayId: array._id, objectId: replicatedObject._id
         }))?.score === 1)
 
-        const updated = await source.DB.send({
+        const updated = await source.db.send({
             method: 'object.update', database: 'replicated', array: 'items', object: { _id: replicatedObject._id, score: 2 }
         })
         assert.equal(updated.success, true, updated.error)
-        await waitFor(async () => (await target.DB.readLocalEntity({
+        await waitFor(async () => (await target.db.readLocalEntity({
             type: 'object', databaseId: database._id, arrayId: array._id, objectId: replicatedObject._id
         }))?.score === 2)
-        assert.equal((await target.DB.readLocalEntity({
+        assert.equal((await target.db.readLocalEntity({
             type: 'array', databaseId: database._id, arrayId: array._id
         })).length, 2)
 
-        const deleted = await source.DB.send({
+        const deleted = await source.db.send({
             method: 'object.delete', database: 'replicated', array: 'items', object: { _id: replicatedObject._id }
         })
         assert.equal(deleted.success, true, deleted.error)
-        await waitFor(async () => !(await target.DB.readLocalEntity({
+        await waitFor(async () => !(await target.db.readLocalEntity({
             type: 'object', databaseId: database._id, arrayId: array._id, objectId: replicatedObject._id
         })))
-        assert.equal((await target.DB.readLocalEntity({
+        assert.equal((await target.db.readLocalEntity({
             type: 'array', databaseId: database._id, arrayId: array._id
         })).length, 1)
         assert.ok(source.cluster.sent.some(message =>

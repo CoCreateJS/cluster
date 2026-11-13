@@ -60,6 +60,7 @@
     "@cocreate/workflows": "^1.1.1",
     "@cocreate/api": "^2.1.1",
     "ws": "^8.21.0",
-    "@cocreate/socket": "^3.0.0"
+    "@cocreate/socket": "^3.0.0",
+    "@cocreate/mcp": "^0.1.0"
   }
 }

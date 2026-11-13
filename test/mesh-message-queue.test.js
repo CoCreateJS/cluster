@@ -45,6 +45,18 @@ test('connecting and disconnected messages replay in FIFO order on the replaceme
     assert.equal(mesh.messageQueues.size, 0);
 });
 
+test('a prepared replication frame is queued without serializing its value again', t => {
+    const { mesh, sockets } = setup(t);
+    let encodings = 0;
+    const message = { method: 'db.partition.update', server: 'peer', uuid: 'prepared',
+        value: { toJSON() { encodings++; return { entries: [[1, 'object']] }; } } };
+    const encoded = JSON.stringify(message);
+    mesh.send(message, encoded);
+    sockets[0].open();
+    assert.equal(encodings, 1);
+    assert.deepEqual(sockets[0].sent[0].value.entries, [[1, 'object']]);
+});
+
 test('intentional closure discards pending messages and does not retry', t => {
     const { mesh, sockets, send } = setup(t);
     send(1);
