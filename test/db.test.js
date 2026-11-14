@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { initializeServerDB } from '@cocreate/db'
+import { initializeServerDB, fileId } from '@cocreate/db'
 
 function createServer({ id, isPrimary, directory, send, clusterSend, peerTimeoutMs }) {
     const server = new EventEmitter()
@@ -24,8 +24,16 @@ function createServer({ id, isPrimary, directory, send, clusterSend, peerTimeout
     initializeServerDB(server, { directory, peerTimeoutMs, writeBehind: false })
     const scope = { organization_id: '000000000000000000000001', storage: 'production', storageId: '000000000000000000000099', database: 'app' }
     const sendLocal = server.db.send.bind(server.db)
-    const ready = sendLocal({ ...scope, method: 'storage.create' })
-    server.db.send = async payload => { await ready; return sendLocal({ ...scope, ...payload }) }
+    let ready = Promise.resolve()
+    let initialized = false
+    server.db.send = async payload => {
+        if (!initialized && /\.(create|update|delete)$/.test(payload.method)) {
+            initialized = true
+            ready = sendLocal({ ...scope, method: 'storage.create' })
+        }
+        await ready
+        return sendLocal({ ...scope, ...payload })
+    }
     for (const method of ['updateDistribution', 'getDistribution', 'listDistribution', 'readLocalEntity', 'applyReplicatedObjectMutation']) {
         if (!server.db[method]) continue
         const local = server.db[method].bind(server.db)
@@ -66,7 +74,7 @@ test('server.db broadcasts local availability transitions and applies remote eve
 
         const databaseId = database.database[0]._id
         const arrayId = array.array[0]._id
-        const objectId = created.object[0]._id
+        const objectId = fileId(created.object[0])
         const remoteEvent = {
             method: 'db.distribution',
             serverId: 'server-peer',
@@ -137,7 +145,7 @@ test('peer document requests target one node, correlate replies, and return comp
         isPrimary: true,
         directory: sourceDirectory,
         clusterSend: payload => {
-            if (payload.method === 'db.document.response') target.cluster.emit(payload.method, payload)
+            if (['db.document.response', 'db.partition.response'].includes(payload.method)) target.cluster.emit(payload.method, payload)
         }
     })
     target = createServer({
@@ -145,7 +153,7 @@ test('peer document requests target one node, correlate replies, and return comp
         isPrimary: true,
         directory: targetDirectory,
         clusterSend: payload => {
-            if (payload.method === 'db.document.request') source.cluster.emit(payload.method, payload)
+            if (['db.document.request', 'db.partition.request'].includes(payload.method)) source.cluster.emit(payload.method, payload)
         }
     })
 
@@ -157,11 +165,9 @@ test('peer document requests target one node, correlate replies, and return comp
             object: { name: 'Ada', secret: { token: 'complete' } }
         })).object[0]
 
-        for (const entity of [
-            { databaseId: database._id },
-            { databaseId: database._id, arrayId: array._id },
-            { databaseId: database._id, arrayId: array._id, objectId: object._id }
-        ]) await target.db.updateDistribution({ ...entity, nodeId: source.id, operation: 'add' })
+        const inventory = await source.db.distribution.local.snapshot()
+        target.db.distribution.peers.replace(source.id, inventory, 'cold-peer-test', 1)
+        await target.db.applyRoots(inventory.roots)
 
         const result = await target.db.send({
             method: 'object.read',
@@ -177,9 +183,10 @@ test('peer document requests target one node, correlate replies, and return comp
         }).then(record => record.secret), { token: 'complete' })
 
         const requests = target.cluster.sent.filter(message => message.method === 'db.document.request')
-        assert.deepEqual(requests.map(message => message.type), ['database', 'array', 'object'])
+        assert.deepEqual(requests.map(message => message.type), ['storage', 'database', 'array', 'object'])
         assert.ok(requests.every(message => message.server === source.id && message.requestId))
     } finally {
+        await Promise.all([source.db.close(), target.db.close()])
         await Promise.all([
             rm(sourceDirectory, { recursive: true, force: true }),
             rm(targetDirectory, { recursive: true, force: true })
@@ -279,7 +286,7 @@ test('index partitions are acquired from a peer, register holders, and propagate
         for (const entity of [
             { databaseId: database._id },
             { databaseId: database._id, arrayId: array._id }
-        ]) await target.db.updateDistribution({ ...entity, nodeId: source.id, operation: 'add' })
+        ]) await target.db.updateDistribution({ ...entity, storage: 'production', databaseFileId: fileId(database), arrayFileId: fileId(array), nodeId: source.id, operation: 'add' })
 
         for (const { partitionId, nodeIds } of await source.db.listPartitions())
             for (const nodeId of nodeIds)
@@ -292,8 +299,9 @@ test('index partitions are acquired from a peer, register holders, and propagate
             { value: 4, objectId: 'object-1' }
         ])
 
+        const catalogId = (await source.db.index.read(databaseName, arrayName, 'score')).indexes.number.catalog
         const partitionId = (await source.db.listPartitions())
-            .find(({ partitionId }) => partitionId.endsWith(`databases/${database._id}/arrays/${array._id}/index/index.json`)).partitionId
+            .find(({ partitionId }) => partitionId.endsWith(`/indexes/${catalogId}.json`)).partitionId
         await waitFor(async () => (await source.db.getPartitionHolders(partitionId)).includes(target.id))
 
         const sentBeforeMutation = source.cluster.sent.length
@@ -311,6 +319,7 @@ test('index partitions are acquired from a peer, register holders, and propagate
         assert.deepEqual(await collect(target.db.index.scan(databaseName, arrayName, 'score', { type: 'number' })), [{ value: 9, objectId: 'object-1' }])
     } finally {
         await settleDeliveries()
+        await Promise.all([source.db.close(), target.db.close()])
         await Promise.all([
             rm(sourceDirectory, { recursive: true, force: true }),
             rm(targetDirectory, { recursive: true, force: true })
@@ -347,8 +356,12 @@ test('object create, update, and delete mutations follow index partition holders
         })
         assert.equal(created.success, true, created.error)
         const object = created.object[0]
-        const partitions = (await source.db.listPartitions()).filter(({ partitionId }) =>
-            partitionId.includes(`databases/${database._id}/arrays/${array._id}/index/`))
+        const catalogId = (await source.db.index.read('replicated', 'items', 'score')).indexes.number.catalog
+        const partitions = []
+        for (const partition of await source.db.listPartitions()) {
+            if (!partition.nodeIds.includes(source.id)) continue
+            if ((await source.db.readIndexPartition(partition.partitionId))?.catalog === catalogId) partitions.push(partition)
+        }
         assert.ok(partitions.length, JSON.stringify(await source.db.listPartitions()))
 
         const [databaseRecord, arrayRecord] = await Promise.all([
@@ -369,7 +382,7 @@ test('object create, update, and delete mutations follow index partition holders
         assert.equal(second.success, true, second.error)
         const replicatedObject = second.object[0]
         await waitFor(async () => (await target.db.readLocalEntity({
-            type: 'object', databaseId: database._id, arrayId: array._id, objectId: replicatedObject._id
+            type: 'object', databaseId: database._id, arrayId: array._id, objectId: fileId(replicatedObject)
         }))?.score === 1)
 
         const updated = await source.db.send({
@@ -377,7 +390,7 @@ test('object create, update, and delete mutations follow index partition holders
         })
         assert.equal(updated.success, true, updated.error)
         await waitFor(async () => (await target.db.readLocalEntity({
-            type: 'object', databaseId: database._id, arrayId: array._id, objectId: replicatedObject._id
+            type: 'object', databaseId: database._id, arrayId: array._id, objectId: fileId(replicatedObject)
         }))?.score === 2)
         assert.equal((await target.db.readLocalEntity({
             type: 'array', databaseId: database._id, arrayId: array._id
@@ -388,7 +401,7 @@ test('object create, update, and delete mutations follow index partition holders
         })
         assert.equal(deleted.success, true, deleted.error)
         await waitFor(async () => !(await target.db.readLocalEntity({
-            type: 'object', databaseId: database._id, arrayId: array._id, objectId: replicatedObject._id
+            type: 'object', databaseId: database._id, arrayId: array._id, objectId: fileId(replicatedObject)
         })))
         assert.equal((await target.db.readLocalEntity({
             type: 'array', databaseId: database._id, arrayId: array._id
@@ -397,6 +410,7 @@ test('object create, update, and delete mutations follow index partition holders
             message.method === 'db.object.mutation' && message.server === target.id))
         await new Promise(resolve => setTimeout(resolve, 50))
     } finally {
+        await Promise.all([source.db.close(), target.db.close()])
         await Promise.all([
             rm(sourceDirectory, { recursive: true, force: true }),
             rm(targetDirectory, { recursive: true, force: true })
