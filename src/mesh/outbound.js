@@ -193,6 +193,7 @@ export class ServerMeshOutbound {
 
             clientSocket.on('close', (code) => {
                 if (this.mesh.activeConnections.get(connectionKey) !== clientSocket) return;
+                this.mesh.peerDisconnected(clientSocket);
                 if (this.mesh.isClosed || clientSocket.intentionalClose || code === 1000 ||
                     (organization_id && !this.mesh.organizations.has(organization_id)) || retryCount >= maxRetries) {
                     this.retryTimers.delete(connectionKey);

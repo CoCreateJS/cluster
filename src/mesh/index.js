@@ -80,7 +80,15 @@ export class ServerMesh extends EventEmitter {
         });
     }
 
+    peerDisconnected(socket) {
+        if (!socket.isControlSocket || !socket.serverId || socket.distributionDisconnected) return;
+        if (this.controlSockets.some(peer => peer !== socket && peer.serverId === socket.serverId && peer.readyState === 1)) return;
+        socket.distributionDisconnected = true;
+        this.emit('peerDisconnected', { nodeId: socket.serverId });
+    }
+
     syncOrganizations(socket) {
+        if (socket.serverId) this.emit('peerConnected', { nodeId: socket.serverId });
         for (const organization_id of this.organizations.keys()) {
             this.announceOrganization(organization_id, socket);
         }
@@ -494,7 +502,7 @@ export class ServerMesh extends EventEmitter {
                 peerUnavailable: [{ ...structuredClone(report),
                     peerReachable: [...this.activeConnections.values()].some(peer => peer.serverId === report.serverId && peer.readyState === 1)
                 }]
-            }, { internal: true });
+            });
             if (!result || result.success === false ||
                 (Array.isArray(result.error) ? result.error.length : result.error)) {
                 throw new Error('peerUnavailable workflow did not confirm persistence.');
@@ -534,7 +542,10 @@ export class ServerMesh extends EventEmitter {
             if (socket === ws) this.activeConnections.delete(key);
         }
         const controlIndex = this.controlSockets.indexOf(ws);
-        if (controlIndex !== -1) this.controlSockets.splice(controlIndex, 1);
+        if (controlIndex !== -1) {
+            this.controlSockets.splice(controlIndex, 1);
+            this.peerDisconnected(ws);
+        }
         for (const [orgId, sockets] of this.organizations.entries()) {
             const index = sockets.indexOf(ws);
             if (index !== -1) sockets.splice(index, 1);

@@ -4,6 +4,24 @@ import { EventEmitter } from 'node:events';
 import { ServerMesh } from '../src/mesh/index.js';
 import { ServerMeshOutbound } from '../src/mesh/outbound.js';
 
+test('control peers announce connection and immediate disconnection without duplicate close events', () => {
+    const mesh = new ServerMesh();
+    const events = [];
+    mesh.on('peerConnected', value => events.push(['connected', value.nodeId]));
+    mesh.on('peerDisconnected', value => events.push(['disconnected', value.nodeId]));
+    const first = { serverId: 'peer', isControlSocket: true, readyState: 1 };
+    const second = { serverId: 'peer', isControlSocket: true, readyState: 1 };
+    mesh.controlSockets.push(first, second);
+    mesh.syncOrganizations(first);
+    first.readyState = 3;
+    mesh.peerDisconnected(first);
+    assert.deepEqual(events, [['connected', 'peer']]);
+    second.readyState = 3;
+    mesh.peerDisconnected(second);
+    mesh.peerDisconnected(second);
+    assert.deepEqual(events, [['connected', 'peer'], ['disconnected', 'peer']]);
+});
+
 function setup(t) {
     const sockets = [];
     class Socket extends EventEmitter {
@@ -137,7 +155,7 @@ function exhaust(t, sockets) {
     sockets.at(-1).close(1006);
 }
 
-test('retry exhaustion emits peerUnavailable and directly invokes its internal workflow with the queue', async t => {
+test('retry exhaustion emits peerUnavailable and directly invokes its workflow with the queue', async t => {
     const { mesh, sockets, send } = setup(t);
     const events = [], invocations = [];
     mesh.server.emit = (name, report) => events.push({ name, report });
@@ -149,7 +167,7 @@ test('retry exhaustion emits peerUnavailable and directly invokes its internal w
     assert.equal(events[0].name, 'peerUnavailable');
     assert.equal(invocations.length, 1);
     assert.equal(invocations[0].payload.method, 'workflow.peerUnavailable');
-    assert.equal(invocations[0].options.internal, true);
+    assert.equal(invocations[0].options, undefined);
     const report = invocations[0].payload.peerUnavailable[0];
     assert.equal(report.serverId, 'peer');
     assert.equal(report.observerId, 'self');

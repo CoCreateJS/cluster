@@ -159,6 +159,7 @@ export class ServerMeshInbound {
 
             ws.on('close', code => {
                 if (this.mesh.activeConnections.get(connectionKey) !== ws) return;
+                this.mesh.peerDisconnected(ws);
                 console.log(`[@cocreate/server-mesh/inbound] Inbound peer connection ${identifier} dropped.`);
                 if (this.mesh.isClosed || ws.intentionalClose || code === 1000) {
                     this.mesh.discardMessageQueue(ws, 'connection closed');

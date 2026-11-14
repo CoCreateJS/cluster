@@ -32,7 +32,7 @@ function createServer({ id, isPrimary, directory, send, clusterSend, peerTimeout
         server.db[method] = async payload => { await ready; return local({ ...scope, ...payload }) }
     }
     if (server.db.index) {
-        for (const method of ['get', 'getMetadata', 'set', 'remove']) {
+        for (const method of ['read', 'getMetadata', 'create', 'update', 'delete']) {
             const local = server.db.index[method].bind(server.db.index)
             server.db.index[method] = async (...args) => { await ready; return local(scope, ...args) }
         }
@@ -274,7 +274,7 @@ test('index partitions are acquired from a peer, register holders, and propagate
         const arrayName = 'items'
         const database = (await source.db.send({ method: 'database.create', database: databaseName })).database[0]
         const array = (await source.db.send({ method: 'array.create', database: databaseName, array: arrayName })).array[0]
-        await source.db.index.set(databaseName, arrayName, 'score', 4, 'object-1')
+        await source.db.index.create(databaseName, arrayName, 'score', 4, 'object-1')
 
         for (const entity of [
             { databaseId: database._id },
@@ -297,8 +297,8 @@ test('index partitions are acquired from a peer, register holders, and propagate
         await waitFor(async () => (await source.db.getPartitionHolders(partitionId)).includes(target.id))
 
         const sentBeforeMutation = source.cluster.sent.length
-        await source.db.index.remove(databaseName, arrayName, 'score', 4, 'object-1')
-        await source.db.index.set(databaseName, arrayName, 'score', 9, 'object-1')
+        await source.db.index.delete(databaseName, arrayName, 'score', 4, 'object-1')
+        await source.db.index.create(databaseName, arrayName, 'score', 9, 'object-1')
         await waitFor(async () => {
             const entries = await collect(target.db.index.scan(databaseName, arrayName, 'score', { type: 'number' }))
             return entries.length === 1 && entries[0].value === 9
