@@ -3,7 +3,7 @@ import test from 'node:test';
 import { Readable } from 'node:stream';
 import { setImmediate } from 'node:timers/promises';
 import { init } from '../src/manager.js';
-import apiKeySeed from '../../../CoCreate-app/src/apps/api-keys/config/data.json' with { type: 'json' };
+import apiKeySeed from '../../../app/src/apps/api-keys/config/data.json' with { type: 'json' };
 
 const id = 'server-1';
 const update = status => ({
