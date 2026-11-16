@@ -16,7 +16,7 @@ test('workers never query cluster repositories or prepare checkouts', async () =
 test('primary reads cluster-owned entries without repository config overrides', async t => {
     restoreEnvironment(t);
     t.mock.method(config, 'get', () => assert.fail('No repository config lookup'));
-    t.mock.method(config, 'query', () => assert.fail('No repository server-config lookup'));
+    t.mock.method(config, 'query', () => assert.fail('No configs lookup for repository settings'));
     let reads = 0;
     const repository = await init({ isPrimary: true, projectRoot: '/srv/server', organization_id: 'tenant', cluster_id: 'cluster-1', host: 'tenant.test', crud: { send: async request => {
         reads++;

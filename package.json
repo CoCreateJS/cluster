@@ -44,24 +44,10 @@
   "type": "module",
   "main": "./src/index.js",
   "dependencies": {
-    "@cocreate/api": "^2.1.1",
-    "@cocreate/authenticate": "^2.0.1",
-    "@cocreate/authorize": "^2.1.1",
-    "@cocreate/autoscaler": "^2.1.1",
     "@cocreate/config": "^2.0.1",
-    "@cocreate/cron": "^2.0.1",
-    "@cocreate/crud": "^2.0.4",
-    "@cocreate/db": "^1.0.0",
-    "@cocreate/file": "^2.0.1",
-    "@cocreate/kms": "^1.0.0",
     "@cocreate/lazy-loader": "^2.0.1",
-    "@cocreate/mcp": "^0.1.0",
-    "@cocreate/socket": "^3.0.0",
-    "@cocreate/telemetry": "^2.0.2",
-    "@cocreate/tls": "^2.0.1",
-    "@cocreate/usage": "^2.0.2",
+    "@cocreate/log": "^1.0.0",
     "@cocreate/utils": "^2.0.2",
-    "@cocreate/workflows": "^1.1.1",
     "ws": "^8.21.0"
   }
 }

@@ -765,8 +765,8 @@ New signup and repository startup default to `main`, so the first upload targets
 The cluster document owns a `repositories` array. URL is each entry's identity;
 no generated repository entry ID is used. The primary queries its own cluster
 once during repository initialization, before workers fork. Global repository
-config and servers_config type repository records are no longer loaded. The old
-App repository server-config seed is removed; existing records of that type are
+config and configs type repository records are no longer loaded. The old
+App repository config seed is removed; existing records of that type are
 ignored. Organization git metadata remains descriptive and is not a startup
 configuration fallback.
 

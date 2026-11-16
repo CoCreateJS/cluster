@@ -18,21 +18,8 @@
 
 import { EventEmitter } from 'node:events';
 
-import TLS from '@cocreate/tls';
 import ServerMesh from './mesh/index.js';
-import ServerAutoscaler from '@cocreate/autoscaler';
-import ServerTelemetry from '@cocreate/telemetry';
 import Config from '@cocreate/config';
-import authenticate from '@cocreate/authenticate';
-import authorize from '@cocreate/authorize';
-
-import { SocketServer } from '@cocreate/socket';
-import MCP from '@cocreate/mcp';
-import { crudServer } from '@cocreate/crud';
-import FileServer from '@cocreate/file/server';
-import ApiServer from '@cocreate/api';
-import Workflow from '@cocreate/workflows';
-import Usage from '@cocreate/usage';
 
 import { ObjectId, getClientInfo } from '@cocreate/utils';
 
@@ -43,12 +30,10 @@ import http from './http.js';
 import IPC from './ipc.js';
 import Storage from './storage.js';
 import State from './state.js';
-import Log from './log.js';
+import Log from '@cocreate/log';
 import ApiKey from './apikey.js';
 import Repository from './repository/index.js';
 import Workers from './workers.js';
-import { CoCreateDB } from '@cocreate/db';
-import KMS from '@cocreate/kms';
 
 export { Workers as ClusterManager } from './workers.js';
 
@@ -76,11 +61,11 @@ export class CoCreateServer {
 
         // Directly bind cluster instance properties to parent server instance
         this.isPrimary = this.workers.isPrimary;
+        this.isWorker = !this.isPrimary;
 
         // Initialize reactive cluster storage bound to cluster IPC promises
         this.storage = Storage.init(this, this.workers.pendingPromises);
-        this.authenticate = authenticate.init(this);
-        this.authorize = authorize;
+        this.send = IPC.init(this, this.workers.pendingPromises);
     }
 
     /** Public Event API delegates (keeps prototype clean from standard EventEmitter bloat)  * @private
@@ -131,7 +116,6 @@ export class CoCreateServer {
 
         this.log = await Log.init(this);
         this.state = await State.init(this);
-        this.send = IPC.init(this, this.workers.pendingPromises);
 
         const config = await Config.prompt({
             'organization_id': '',
@@ -155,22 +139,14 @@ export class CoCreateServer {
             this.id = process.env.SERVER_ID;
         }
 
-        // CoCreateDB owns its directory configuration and attaches itself to this server.
-        await CoCreateDB.init(this);
-
         // Configure the local worker collection
         this.workers.configureWorkers(Config.get('workers'));
 
-        this.crud = await crudServer.init(this);
-        this.kms = KMS.init(this);
         try {
             await ApiKey.init(this);
         } catch {
             console.error('[@cocreate/cluster] Unable to initialize the node organization API key.');
         }
-        this.authenticate = authenticate.init(this);
-        this.api = await ApiServer.init(this);
-        this.workflow = await Workflow.init(this);
         await Manager.init(this);
         if (!this.isPrimary) await this.cluster.init(this);
 
@@ -194,7 +170,6 @@ export class CoCreateServer {
                 ...this.deployment,
                 location: { ...persistedServer?.deployment?.location, ...location }
             });
-            this.autoscaler = await ServerAutoscaler.init(this);
             await this.cluster.init(this);
 
             // Reset logs array for a fresh logging session on master startup
@@ -223,9 +198,6 @@ export class CoCreateServer {
                 console.log(`[@cocreate/cluster] [WORKER ${this.workerId}] running with PID: ${process.pid} (Server ID: ${this.id})`);
             }
 
-            this.telemetry = await ServerTelemetry.init(this);
-            this.usage = await Usage.init(this);
-
             if (!this.ip) {
                 this.ip = process.env.SERVER_IP || (await getClientInfo()).ip;
             }
@@ -243,13 +215,7 @@ export class CoCreateServer {
                 this.deployment.location = await getClientInfo(this.id);
             }
 
-            // Initialize certificates module on worker
-            this.tls = await TLS.init(this);
-
-            this.files = await FileServer.init(this);
-            this.mcp = await MCP.init(this);
             await http.init(this);
-            this.socket = new SocketServer(this);
 
             // Publish worker active running state object to DB upon creation/startup
             await this.state.save('running');

@@ -10,10 +10,7 @@ import { uuid } from '@cocreate/utils';
  * @environment server
  */
 async function init(server) {
-    const HTTP_PORT = process.env.HTTP_PORT || 80;
     const HTTPS_PORT = process.env.HTTPS_PORT || 443;
-    const BIND_IP = process.env.BIND_IP || '0.0.0.0';
-
     const httpsOptions = server.tls.createHttpsOptions(server);
     server.https = Https.createServer(httpsOptions, (req, res) => handleRequest(server, req, res));
 
@@ -32,6 +29,8 @@ async function init(server) {
         res.end();
     });
 
+    server.socket?.attach();
+
     const reportListening = state => {
         if (process.connected) {
             process.send({ type: 'listening_state', state });
@@ -40,13 +39,6 @@ async function init(server) {
 
     server.http.on('listening', () => reportListening(true));
     server.http.on('close', () => reportListening(false));
-    server.http.listen(HTTP_PORT, BIND_IP, () => {
-        console.log(`[@cocreate/cluster] [WORKER ${server.workerId}] HTTP listening on ${BIND_IP}:${HTTP_PORT}`);
-    });
-
-    server.https.listen(HTTPS_PORT, BIND_IP, () => {
-        console.log(`[@cocreate/cluster] [WORKER ${server.workerId}] HTTPS listening on ${BIND_IP}:${HTTPS_PORT}`);
-    });
 }
 
 /**

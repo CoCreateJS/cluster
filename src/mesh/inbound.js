@@ -3,8 +3,37 @@ import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import crypto from 'node:crypto';
+
+function closePort(port) {
+    if (process.platform === 'win32') {
+        const output = execFileSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8' });
+        const pids = [...new Set(output.split('\n').flatMap(line => {
+            const fields = line.trim().split(/\s+/);
+            const localPort = Number(fields[1]?.split(':').at(-1));
+            return fields[0] === 'TCP' && localPort === Number(port) && fields[3] === 'LISTENING'
+                ? [Number(fields[4])]
+                : [];
+        }))];
+        for (const pid of pids) {
+            execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+        }
+        return;
+    }
+
+    try {
+        execFileSync('sudo', ['-n', 'fuser', '-k', `${port}/tcp`], { stdio: 'ignore' });
+    } catch (err) {
+        try {
+            execFileSync('fuser', ['-k', `${port}/tcp`], { stdio: 'ignore' });
+        } catch (fallbackError) {
+            if (err.code !== 'ENOENT' && fallbackError.code !== 'ENOENT' && fallbackError.status !== 1) {
+                throw fallbackError;
+            }
+        }
+    }
+}
 
 /**
  * ServerMeshInbound manages inbound HTTPS and WebSocket secure listening transports,
@@ -96,7 +125,14 @@ export class ServerMeshInbound {
             throw new Error("Unable to boot secure mesh server: TLS credential generation failed.");
         }
 
-        this.secureMeshServer = https.createServer(credentials);
+        const existingServer = this.secureMeshServer;
+        const secureMeshServer = https.createServer(credentials);
+        if (existingServer) {
+            console.log(`[@cocreate/server-mesh/inbound] Closing existing mesh listener on port ${this.meshPort} before listening again.`);
+            await this.close();
+        }
+        closePort(this.meshPort);
+        this.secureMeshServer = secureMeshServer;
 
         this.secureMeshServer.on('error', (err) => {
             if (err.code === 'EADDRINUSE') {
@@ -262,19 +298,31 @@ export class ServerMeshInbound {
             this.heartbeatInterval = null;
         }
 
-        if (this.meshWss) {
-            try { this.meshWss.close(); } catch {}
+        const meshWss = this.meshWss;
+        const secureMeshServer = this.secureMeshServer;
+        this.meshWss = null;
+        this.secureMeshServer = null;
+
+        if (meshWss) {
+            for (const socket of meshWss.clients) {
+                try { socket.terminate(); } catch {}
+            }
+            try { meshWss.close(); } catch {}
         }
 
-        return new Promise((resolve) => {
-            if (this.secureMeshServer) {
-                this.secureMeshServer.close(() => {
+        if (!secureMeshServer) return;
+
+        await new Promise((resolve) => {
+            secureMeshServer.close((err) => {
+                if (err?.code === 'ERR_SERVER_NOT_RUNNING') {
+                    console.log(`[@cocreate/server-mesh/inbound] Secure listener on port ${this.meshPort} was already closed.`);
+                } else if (err) {
+                    console.error(`[@cocreate/server-mesh/inbound] Failed to release secure port ${this.meshPort}:`, err.message);
+                } else {
                     console.log(`[@cocreate/server-mesh/inbound] Secure port ${this.meshPort} successfully released.`);
-                    resolve();
-                });
-            } else {
+                }
                 resolve();
-            }
+            });
         });
     }
 }
