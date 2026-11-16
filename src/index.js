@@ -48,6 +48,7 @@ import ApiKey from './apikey.js';
 import Repository from './repository/index.js';
 import Workers from './workers.js';
 import { CoCreateDB } from '@cocreate/db';
+import KMS from '@cocreate/kms';
 
 export { Workers as ClusterManager } from './workers.js';
 
@@ -161,6 +162,7 @@ export class CoCreateServer {
         this.workers.configureWorkers(Config.get('workers'));
 
         this.crud = await crudServer.init(this);
+        this.kms = KMS.init(this);
         try {
             await ApiKey.init(this);
         } catch {
