@@ -15,6 +15,7 @@
 
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
+import { BinaryReceiver, deserialize, sendBinary } from '@cocreate/socket/binary';
 import { ServerMeshInbound } from './inbound.js';
 import { ServerMeshOutbound } from './outbound.js';
 
@@ -288,8 +289,13 @@ export class ServerMesh extends EventEmitter {
     handleIncomingMessage(rawData, ws) {
         let message;
         try {
-            message = JSON.parse(rawData.toString());
+            const receiver = ws.binaryReceiver ||= new BinaryReceiver();
+            const complete = receiver.push(rawData);
+            if (!complete) return;
+            try { message = deserialize(complete); }
+            finally { receiver.release(complete); }
         } catch (err) {
+            console.error('[@cocreate/server-mesh] Invalid binary peer message:', err.message);
             return;
         }
 
@@ -368,7 +374,7 @@ export class ServerMesh extends EventEmitter {
  * @private
  * @environment server
  */
-    send(payload, encoded) {
+    send(payload) {
         if (!payload || typeof payload !== 'object' || !payload.method) {
             console.error("[@cocreate/server-mesh] Cannot transmit mesh payload without a defined 'method' key.");
             return;
@@ -402,7 +408,7 @@ export class ServerMesh extends EventEmitter {
                 });
 
             const uniqueSockets = Array.from(new Set(targets));
-            this.socketSend(uniqueSockets, payload, encoded);
+            this.socketSend(uniqueSockets, payload);
         }
     }
 
@@ -414,9 +420,8 @@ export class ServerMesh extends EventEmitter {
  * @private
  * @environment server
  */
-    socketSend(sockets, data, encoded) {
+    socketSend(sockets, data) {
         const targetSockets = Array.isArray(sockets) ? sockets : [sockets];
-        const dataStr = encoded ?? (typeof data === 'string' ? data : JSON.stringify(data));
 
         if (this.isClosed) return;
         const peers = new Set();
@@ -428,7 +433,11 @@ export class ServerMesh extends EventEmitter {
             // Anonymous sockets cannot survive replacement, but can still send directly.
             if (key === undefined) {
                 try {
-                    if (socket.readyState === 1) socket.send(dataStr);
+                    if (socket.readyState === 1) {
+                        void sendBinary(socket, data).catch(err => {
+                            console.error('[@cocreate/server-mesh] Anonymous socket send failed:', err.message);
+                        });
+                    }
                 } catch (err) {
                     console.error('[@cocreate/server-mesh] Anonymous socket send failed:', err.message);
                 }
@@ -436,8 +445,8 @@ export class ServerMesh extends EventEmitter {
             }
             let queue = this.messageQueues.get(key);
             if (!queue) this.messageQueues.set(key, queue = []);
-            queue.push(dataStr);
-            this.flushMessageQueue(socket);
+            queue.push(data);
+            void this.flushMessageQueue(socket);
         }
     }
 
@@ -446,28 +455,28 @@ export class ServerMesh extends EventEmitter {
         return JSON.stringify([socket.isControlSocket ? 'control' : socket.organization_id || 'control', socket.serverId]);
     }
 
-    flushMessageQueue(socket) {
+    async flushMessageQueue(socket) {
         const key = this.messageQueueKey(socket);
         const queue = this.messageQueues.get(key);
         if (!queue || socket.readyState !== 1) return;
-        let sent = 0;
+        if (socket.meshSending) return;
+        socket.meshSending = true;
         try {
-            while (sent < queue.length && socket.readyState === 1) {
-                socket.send(queue[sent]);
-                sent++;
+            while (queue.length && socket.readyState === 1) {
+                await sendBinary(socket, queue[0]);
+                queue.shift();
             }
         } catch (err) {
             console.error('[@cocreate/server-mesh] Message retained after send failure:', socket.serverId, err.message);
+        } finally {
+            socket.meshSending = false;
         }
-        if (sent === queue.length) this.messageQueues.delete(key);
-        else if (sent) queue.splice(0, sent);
+        if (!queue.length) this.messageQueues.delete(key);
     }
 
     async peerUnavailable(socket, details) {
         const key = this.messageQueueKey(socket);
-        const queuedMessages = (this.messageQueues.get(key) || []).map(data => {
-            try { return JSON.parse(data); } catch { return data; }
-        });
+        const queuedMessages = [...(this.messageQueues.get(key) || [])];
         this.messageQueues.delete(key);
         const report = {
             id: crypto.randomUUID(),

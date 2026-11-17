@@ -192,6 +192,7 @@ export class ServerMeshOutbound {
             });
 
             clientSocket.on('close', (code) => {
+                clientSocket.binaryReceiver?.clear();
                 if (this.mesh.activeConnections.get(connectionKey) !== clientSocket) return;
                 this.mesh.peerDisconnected(clientSocket);
                 if (this.mesh.isClosed || clientSocket.intentionalClose || code === 1000 ||

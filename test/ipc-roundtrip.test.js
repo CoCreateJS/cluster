@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import IPC from '../src/ipc.js';
 import Storage from '../src/storage.js';
+import { serialize, deserialize } from '@cocreate/socket/binary';
 
 const eventAPI = `
     server.emitAsync = async (event, payload) => {
@@ -44,7 +45,7 @@ test('real workers reply consistently with async results, errors and ignored ret
         });
         process.send({ ready: true });
     `);
-    cluster.setupPrimary({ exec: filename, execArgv: [] });
+    cluster.setupPrimary({ exec: filename, execArgv: [], serialization: 'advanced' });
     const children = [cluster.fork(), cluster.fork()];
     t.after(async () => {
         for (const worker of children) {
@@ -92,11 +93,11 @@ test('real workers reply consistently with async results, errors and ignored ret
     // Caller discards the send Promise; the transport still clears correlation.
     const received = once(children[0], 'message');
     server.send({ method: 'example.work', master: false, worker: children[0].id, value: 7 });
-    assert.equal((await received)[0].result, 14);
+    assert.equal(deserialize((await received)[0]).result, 14);
     assert.equal(pending.size, 0);
 
     // Unknown/duplicate response envelopes must never execute their method.
-    children[0].send({ method: 'example.sideEffect', uuid: 'late-response', response: true });
+    children[0].send(serialize({ method: 'example.sideEffect', uuid: 'late-response', response: true }));
     const effect = await server.send({ method: 'example.sideEffect', master: false, worker: children[0].id });
     assert.equal(effect.result, 1);
 
@@ -106,7 +107,7 @@ test('real workers reply consistently with async results, errors and ignored ret
     assert.equal(pending.size, 0);
 
     const replies = new Set();
-    const observe = (worker, payload) => { if (payload.uuid === 'broadcast-request') replies.add(worker.id); };
+    const observe = (worker, bytes) => { if (deserialize(bytes).uuid === 'broadcast-request') replies.add(worker.id); };
     cluster.on('message', observe);
     const broadcast = await server.send({ method: 'example.work', uuid: 'broadcast-request', master: false,
         broadcast: true, value: 3, broadcastSender: false });

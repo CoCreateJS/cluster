@@ -19,6 +19,7 @@
 import cluster from 'node:cluster';
 import { getDistribution } from '@cocreate/utils/distribution';
 import { uuid } from '@cocreate/utils';
+import { serialize, deserialize } from '@cocreate/socket/binary';
 
 const presenceEvents = ['orgConnected', 'orgDisconnected'];
 const masterControls = ['restart', 'reboot', 'shutdown'];
@@ -32,9 +33,14 @@ const organizationDelivery = payload => Boolean(payload.organization_id &&
 
 /** IPC owns request/reply correlation; callers always receive the envelope. */
 export function init(server, pendingPromises) {
+    if (server.isPrimary && !cluster.isWorker && Object.keys(cluster.workers).length === 0) {
+        cluster.setupPrimary({ serialization: 'advanced' });
+    }
     const organizationWorkers = server.organizationWorkers ||= new Map();
 
-    function transportEnvelope(payload) { return payload; }
+    function transportEnvelope(payload) { return serialize(payload); }
+
+    function decodeEnvelope(payload) { return deserialize(payload); }
 
     function request(send, payload, key, workerId) {
         return new Promise((resolve, reject) => {
@@ -94,7 +100,7 @@ export function init(server, pendingPromises) {
                 .some(id => String(id) !== String(server.id));
         if (!Array.isArray(payload.distributionKeys) && payload.serverId === server.id && targetsOtherNodes &&
             (payload.organization_id || payload.server !== undefined || payload.cluster !== undefined)) {
-            server.cluster.send(transportEnvelope(payload));
+            server.cluster.send(payload);
         }
 
         const distributionTargets = Array.isArray(payload.distributionKeys)
@@ -126,6 +132,7 @@ export function init(server, pendingPromises) {
     }
 
     async function receive(payload, reply, worker) {
+        payload = decodeEnvelope(payload);
         if (payload.response === true) {
             resolveResponse(payload, server.isPrimary ? `${payload.uuid}:${worker.id}` : payload.uuid);
             return;
@@ -138,7 +145,7 @@ export function init(server, pendingPromises) {
         } catch (error) {
             result = { ...payload, success: false, error: error.message };
         }
-        reply({ ...transportEnvelope(result), response: true });
+        reply(transportEnvelope({ ...result, response: true }));
     }
 
     for (const method of presenceEvents) {
