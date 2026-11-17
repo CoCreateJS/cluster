@@ -32,6 +32,7 @@ import Storage from './storage.js';
 import State from './state.js';
 import Log from '@cocreate/log';
 import ApiKey from './apikey.js';
+import OAuth from './oauth.js';
 import Repository from './repository/index.js';
 import Workers from './workers.js';
 
@@ -215,6 +216,7 @@ export class CoCreateServer {
                 this.deployment.location = await getClientInfo(this.id);
             }
 
+            this.oauth = await OAuth.init(this);
             await http.init(this);
 
             // Publish worker active running state object to DB upon creation/startup

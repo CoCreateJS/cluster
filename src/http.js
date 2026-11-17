@@ -75,6 +75,14 @@ async function handleRequest(server, req, res) {
             }
         }
 
+        // OAuth protocol paths are reserved and dispatched before user routes.
+        if (server.oauth?.isReservedPath(reqPath)) {
+            const handler = server.oauth.handlerFor(reqPath);
+            if (!handler) return sendJson(res, 404, { error: 'not_found' });
+            await handler(req, res);
+            if (res.writableEnded || res.headersSent) return;
+        }
+
         // Match registered exact or wildcard routes first.
         let handler = server.routes.get(reqPath);
 
