@@ -274,7 +274,7 @@ export function init(server) {
                 [`oauth.${name}`]: { request },
                 organization_id: organization._id,
                 host,
-                ...(user_id && { user_id })
+                ...(user_id && { user_id, key_id: user_id })
             };
             const result = await server.workflow.run(payload);
             if (result?.error?.length || result?.success === false) {
