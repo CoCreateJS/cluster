@@ -26,6 +26,7 @@ test('real workers reply consistently with async results, errors and ignored ret
         import { EventEmitter } from 'node:events';
         import IPC from ${JSON.stringify(new URL('../src/ipc.js', import.meta.url).href)};
         import Storage from ${JSON.stringify(new URL('../src/storage.js', import.meta.url).href)};
+        import { serialize } from ${JSON.stringify(new URL('../node_modules/@cocreate/socket/src/binary.js', import.meta.url).href)};
         const server = new EventEmitter();
         Object.assign(server, { id: 'node', cluster_id: 'origin-cluster', isPrimary: false, isWorker: true, workerId: cluster.worker.id });
         ${eventAPI}
@@ -43,7 +44,7 @@ test('real workers reply consistently with async results, errors and ignored ret
             await storage.set('shared', payload.value);
             return { ...payload, result: await storage.get('shared'), pending: pending.size };
         });
-        process.send({ ready: true });
+        process.send(serialize({ ready: true }));
     `);
     cluster.setupPrimary({ exec: filename, execArgv: [], serialization: 'advanced' });
     const children = [cluster.fork(), cluster.fork()];
@@ -63,7 +64,7 @@ test('real workers reply consistently with async results, errors and ignored ret
         }
         await rm(directory, { recursive: true, force: true });
     });
-    await Promise.all(children.map(worker => once(worker, 'message')));
+    await Promise.all(children.map(async worker => deserialize((await once(worker, 'message'))[0])));
     const server = new EventEmitter();
     Object.assign(server, { id: 'node', cluster_id: 'origin-cluster', isPrimary: true, workers: new Map(children.map(worker => [worker.id, worker])),
         cluster: { send() { assert.fail('This test only uses IPC'); } } });

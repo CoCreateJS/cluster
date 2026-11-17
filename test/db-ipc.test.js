@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import IPC from '../src/ipc.js';
 import { initializeServerDB } from '@cocreate/db';
+import { deserialize } from '@cocreate/socket/binary';
 
 test('real worker IPC awaits primary CRUD, preserves concurrent updates, and returns errors', { timeout: 30000 }, async t => {
     const directory = await mkdtemp(join(tmpdir(), 'coc-db-real-ipc-'));
@@ -40,7 +41,10 @@ test('real worker IPC awaits primary CRUD, preserves concurrent updates, and ret
     for (const id of [1, 2]) {
         const worker = cluster.fork({ COCREATE_TEST_WORKER_ID: String(id), COCREATE_TEST_DB_DIRECTORY: join(directory, 'no-worker-db') });
         server.workers.set(id, { id, process: worker });
-        const ready = await new Promise(resolve => worker.on('message', payload => { if (payload.fixtureReady) resolve(payload); }));
+        const ready = await new Promise(resolve => worker.on('message', bytes => {
+            const payload = deserialize(bytes);
+            if (payload.fixtureReady) resolve(payload);
+        }));
         assert.deepEqual(ready.driverKeys, ['send']);
     }
     const scope = { database: 'ipc-test', array: 'items', organization_id: '000000000000000000000001', storage: 'production' };

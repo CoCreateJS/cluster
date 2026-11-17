@@ -20,6 +20,7 @@ import { EventEmitter } from 'node:events';
 import cluster from 'node:cluster';
 import os from 'node:os';
 import State from './state.js';
+import { serialize, deserialize } from '@cocreate/socket/binary';
 
 /**
  * Tracks local Node.js worker processes by logical ID and owns fork, readiness,
@@ -93,7 +94,8 @@ export class Workers extends Map {
         this.server.isWorker = this.isWorker;
     }
 
-    #handleWorkerListeningMsg(workerId, msg) {
+    #handleWorkerListeningMsg(workerId, bytes) {
+        const msg = deserialize(bytes);
         if (msg && msg.type === 'listening_state') {
             const w = this.get(workerId);
             if (w && !this.#deleting.has(workerId)) {
@@ -226,7 +228,7 @@ export class Workers extends Map {
         this.server.state?.evaluateMasterFallback?.();
         const stop = () => record.process.kill('SIGTERM');
         try {
-            record.process.send({ method: 'shutdown', master: false, worker: workerId, server: this.server.id }, error => {
+            record.process.send(serialize({ method: 'shutdown', master: false, worker: workerId, server: this.server.id }), error => {
                 if (error) stop();
             });
         } catch {

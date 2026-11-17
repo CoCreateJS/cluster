@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { performance } from 'node:perf_hooks';
 import IPC from '../src/ipc.js';
 import { initializeServerDB } from '@cocreate/db';
+import { serialize } from '@cocreate/socket/binary';
 
 const server = Object.assign(new EventEmitter(), {
     id: 'ipc-db-node', isPrimary: false, workerId: Number(process.env.COCREATE_TEST_WORKER_ID),
@@ -21,4 +22,4 @@ server.on('fixture.crud', async payload => {
 const registrations = [];
 server.on('db.distribution.set', payload => { registrations.push(payload.data); return { ...payload, success: true }; });
 server.on('fixture.distribution', payload => ({ ...payload, result: registrations }));
-process.send({ response: true, fixtureReady: true, driverKeys: Object.keys(db) });
+process.send(serialize({ response: true, fixtureReady: true, driverKeys: Object.keys(db) }));

@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import cluster from 'node:cluster';
 import os from 'node:os';
 import Workers from '../src/workers.js';
+import { serialize, deserialize } from '@cocreate/socket/binary';
 
 function setup(t, count = 2) {
     const original = new Set(cluster.listeners('exit'));
@@ -110,7 +111,8 @@ test('delete requests graceful shutdown once, keeps tracking until exit, and sup
     workers.delete(record.id);
     assert.equal(workers.get(record.id), record);
     assert.equal(workers.size, 1);
-    assert.deepEqual(calls.filter(Array.isArray), [['send', { method: 'shutdown', master: false, worker: record.id, server: 'node-1' }]]);
+    assert.deepEqual(calls.filter(Array.isArray).map(([method, bytes]) => [method, deserialize(bytes)]),
+        [['send', { method: 'shutdown', master: false, worker: record.id, server: 'node-1' }]]);
     await exit(record.process);
     assert.equal(workers.size, 0);
     t.mock.timers.tick(2000);
@@ -143,8 +145,8 @@ test('unexpected exits respawn with the same ID, environment, and readiness hand
     const { workers, forks, calls, exit } = setup(t);
     const first = workers.add({ FEATURE: 'enabled' });
     workers.add();
-    forks[1].worker.emit('message', { type: 'listening_state', state: true });
-    first.process.emit('message', { type: 'listening_state', state: true });
+    forks[1].worker.emit('message', serialize({ type: 'listening_state', state: true }));
+    first.process.emit('message', serialize({ type: 'listening_state', state: true }));
     await flush();
     assert(calls.includes('repository'));
     await exit(first.process, 1);
@@ -155,7 +157,7 @@ test('unexpected exits respawn with the same ID, environment, and readiness hand
     assert.equal(forks.length, 3);
     assert.equal(forks[2].env.WORKER_ID, String(first.id));
     assert.equal(forks[2].env.FEATURE, 'enabled');
-    forks[2].worker.emit('message', { type: 'listening_state', state: true });
+    forks[2].worker.emit('message', serialize({ type: 'listening_state', state: true }));
     await flush();
     assert.equal(calls.filter(item => item === 'repository').length, 2);
 });
@@ -227,7 +229,7 @@ test('a readiness message arriving after delete cannot republish the stopping wo
     const { workers, calls } = setup(t);
     const record = workers.add();
     workers.delete(record.id);
-    record.process.emit('message', { type: 'listening_state', state: true });
+    record.process.emit('message', serialize({ type: 'listening_state', state: true }));
     await flush();
     assert.equal(record.isListening, false);
     assert.equal(calls.includes('running'), false);

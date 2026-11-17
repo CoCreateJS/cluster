@@ -1,6 +1,7 @@
 import Http from 'node:http';
 import Https from 'node:https';
 import { uuid } from '@cocreate/utils';
+import { serialize } from '@cocreate/socket/binary';
 
 /**
  * Initializes the HTTP and HTTPS listeners on the server context.
@@ -33,7 +34,7 @@ async function init(server) {
 
     const reportListening = state => {
         if (process.connected) {
-            process.send({ type: 'listening_state', state });
+            process.send(serialize({ type: 'listening_state', state }));
         }
     };
 

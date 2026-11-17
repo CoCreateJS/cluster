@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import cluster from 'node:cluster';
 import Config from '@cocreate/config';
 import { SocketClient, SocketServer } from '@cocreate/socket';
+import { serialize, deserialize } from '@cocreate/socket/binary';
 import IPC from '../src/ipc.js';
 
 test('a real socket response uses server.send once and fans out without socket forwarding', { timeout: 5000 }, async t => {
@@ -24,7 +25,11 @@ test('a real socket response uses server.send once and fans out without socket f
     const peers = [], workers = [];
     const server = new EventEmitter();
     Object.assign(server, { id: 'node', cluster_id: 'cluster', isPrimary: true, isWorker: true, workerId: 1, http,
-        workers: new Map([[2, { id: 2, process: { isConnected: () => true, send: data => { workers.push(data); queueMicrotask(() => cluster.emit('message', server.workers.get(2), { ...data, response: true })); } } }]]),
+        workers: new Map([[2, { id: 2, process: { isConnected: () => true, send: bytes => {
+            const data = deserialize(bytes);
+            workers.push(data);
+            queueMicrotask(() => cluster.emit('message', server.workers.get(2), serialize({ ...data, response: true })));
+        } } }]]),
         organizationWorkers: new Map([['org', new Set([2])]]),
         cluster: { send: data => peers.push(data) },
         authorize: { check: async () => ({}) }, usage: { send() {} } });

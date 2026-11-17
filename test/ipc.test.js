@@ -3,16 +3,22 @@ import cluster from 'node:cluster';
 import test from 'node:test';
 
 import IPC from '../src/ipc.js';
+import { serialize, deserialize } from '@cocreate/socket/binary';
+
+function emitIPCMessage(worker, payload) {
+    cluster.emit('message', worker, serialize(payload));
+}
 
 function createWorker(id, received) {
     const worker = {
         id, isListening: true, isCordoned: false, isDraining: false, responses: [],
         process: {
             isConnected: () => true,
-            send(payload) {
+            send(bytes) {
+                const payload = deserialize(bytes);
                 if (payload.response) { worker.responses.push(payload); return; }
-                received.push({ id, payload: { ...payload } });
-                queueMicrotask(() => cluster.emit('message', worker, { ...payload, response: true }));
+                received.push({ id, payload });
+                queueMicrotask(() => emitIPCMessage(worker, { ...payload, response: true }));
             }
         }
     };
@@ -136,7 +142,7 @@ test('server.send stores a Promise only at the UUID origin', async () => {
     assert.equal(emitted.length, 0);
 
     const request = received[0].payload;
-    cluster.emit('message', workers.get(2), {
+    emitIPCMessage(workers.get(2), {
         ...request,
         response: true,
         success: true,
@@ -166,7 +172,7 @@ test('forwarded broadcasts await all workers and ignore broadcastSender', async 
     };
     initIPC(server, pendingPromises);
 
-    cluster.emit('message', workers.get(1), {
+    emitIPCMessage(workers.get(1), {
         uuid: 'existing-uuid', serverId: 'server-1', workerId: 1,
         method: 'example.changed',
         broadcast: true,
@@ -288,7 +294,7 @@ test('worker-originated server targets are forwarded into the mesh', () => {
     };
     initIPC(server, new Map());
 
-    cluster.emit('message', sourceWorker, {
+    emitIPCMessage(sourceWorker, {
         uuid: 'worker-originated-uuid', serverId: 'server-1', workerId: 1,
         method: 'configuration.refresh',
         server: 'server-2',
@@ -328,15 +334,15 @@ test('organization messages route only to registered workers and exclude their o
     };
     initIPC(server, new Map());
 
-    cluster.emit('message', workers.get(1), {
+    emitIPCMessage(workers.get(1), {
         method: 'orgConnected', workerId: 1,
         organization_id: 'organization-1'
     });
-    cluster.emit('message', workers.get(2), {
+    emitIPCMessage(workers.get(2), {
         method: 'orgConnected', workerId: 2,
         organization_id: 'organization-1'
     });
-    cluster.emit('message', workers.get(1), {
+    emitIPCMessage(workers.get(1), {
         uuid: 'organization-message', serverId: 'server-1', workerId: 1,
         method: 'crud',
         organization_id: 'organization-1',
@@ -354,23 +360,23 @@ test('organization messages route only to registered workers and exclude their o
     }, new Map());
     const workerListener = process.listeners('message').find(listener => !previousListeners.has(listener));
     t.after(() => process.removeListener('message', workerListener));
-    await workerListener(received[0].payload);
+    await workerListener(serialize(received[0].payload));
     assert.deepEqual(deliveries, [received[0].payload]);
     assert.deepEqual(openedOrganizations, ['organization-1']);
     assert.equal(meshMessages.filter(item => item.uuid === 'organization-message').length, 1);
 
-    cluster.emit('message', workers.get(1), {
+    emitIPCMessage(workers.get(1), {
         method: 'orgDisconnected', workerId: 1,
         organization_id: 'organization-1'
     });
     assert.deepEqual(closedOrganizations, []);
 
-    cluster.emit('message', workers.get(2), {
+    emitIPCMessage(workers.get(2), {
         method: 'orgDisconnected', workerId: 2,
         organization_id: 'organization-1'
     });
     assert.deepEqual(closedOrganizations, ['organization-1']);
-    cluster.emit('message', workers.get(2), {
+    emitIPCMessage(workers.get(2), {
         method: 'orgDisconnected', organization_id: 'organization-1'
     });
     assert.deepEqual(closedOrganizations, ['organization-1'], 'duplicate reports do not emit another transition');
@@ -422,7 +428,7 @@ test('worker IPC forwards local presence events once without reflecting server e
             else delete process[key];
         }
     });
-    Object.defineProperty(process, 'send', { configurable: true, value: payload => sent.push(payload) });
+    Object.defineProperty(process, 'send', { configurable: true, value: bytes => sent.push(deserialize(bytes)) });
     Object.defineProperty(process, 'connected', { configurable: true, value: true });
     const server = { isPrimary: false, isWorker: true, workerId: 3, emit() {} };
     server.send = initIPC(server, new Map());
@@ -471,12 +477,12 @@ test('send starts local, worker and cluster delivery independently and awaits lo
     assert.equal(forwarded.length, 1);
     assert.deepEqual(received.map(item => item.id), [2]);
     assert.equal(forwarded[0].socket, socket);
-    assert.equal(received[0].payload.socket, socket);
+    assert.deepEqual(received[0].payload.socket, socket);
     assert.doesNotThrow(() => JSON.stringify(forwarded[0]));
     assert.equal(pending.size, 1, 'The worker receipt uses the same correlation path as other requests');
     await Promise.resolve();
     assert.equal(local.length, 1);
-    assert.equal(local[0].socket, socket);
+    assert.deepEqual(local[0].socket, socket);
     assert.equal(complete, false);
     assert.equal(pending.size, 0);
     finishLocal();
@@ -528,9 +534,10 @@ test('a worker sends locally and upstream once; receiving another worker deliver
             else delete process[key];
         }
     });
-    Object.defineProperty(process, 'send', { configurable: true, value: data => {
+    Object.defineProperty(process, 'send', { configurable: true, value: bytes => {
+        const data = deserialize(bytes);
         upstream.push(data);
-        if (!data.response) queueMicrotask(() => process.emit('message', { ...data, response: true }));
+        if (!data.response) queueMicrotask(() => process.emit('message', serialize({ ...data, response: true })));
     } });
     Object.defineProperty(process, 'connected', { configurable: true, value: true });
     const previous = new Set(process.listeners('message'));
@@ -544,13 +551,13 @@ test('a worker sends locally and upstream once; receiving another worker deliver
     assert.equal(upstream.length, 1);
     assert.equal(upstream[0].serverId, 'node');
     assert.equal(upstream[0].workerId, 1);
-    assert.equal(upstream[0].socket, socket);
+    assert.deepEqual(upstream[0].socket, socket);
     assert.equal(pending.size, 0);
     const receive = process.listeners('message').find(listener => !previous.has(listener));
-    await receive({ method: 'object.read', organization_id: 'org', serverId: 'remote', workerId: 2 });
+    await receive(serialize({ method: 'object.read', organization_id: 'org', serverId: 'remote', workerId: 2 }));
     assert.equal(local.length, 2);
     assert.equal(upstream.filter(data => !data.response).length, 1, 'Incoming delivery only sends its terminal reply');
-    await receive({ method: 'object.read', organization_id: 'org', worker: 2 });
+    await receive(serialize({ method: 'object.read', organization_id: 'org', worker: 2 }));
     assert.equal(local.length, 2, 'A delivery targeted to another worker must not reach this worker');
     assert.equal(events.length, 0);
 });
@@ -599,7 +606,7 @@ test('unmatched responses never execute a method or generate another response', 
         emit() { assert.fail('An unmatched response must not execute'); } };
     initIPC(server, new Map());
     const worker = createWorker(1, received);
-    cluster.emit('message', worker, { method: 'example.work', uuid: 'finished', response: true });
+    emitIPCMessage(worker, { method: 'example.work', uuid: 'finished', response: true });
     await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(received, []);
     assert.deepEqual(worker.responses, []);
@@ -607,8 +614,9 @@ test('unmatched responses never execute a method or generate another response', 
 
 test('request correlation uses native worker IDs while presence uses the logical slot', async () => {
     const pending = new Map();
-    const process = { id: 41, send(payload) {
-        queueMicrotask(() => cluster.emit('message', process, { ...payload, response: true, result: 'ok' }));
+    const process = { id: 41, send(bytes) {
+        const payload = deserialize(bytes);
+        queueMicrotask(() => emitIPCMessage(process, { ...payload, response: true, result: 'ok' }));
     } };
     const server = { id: 'node', isPrimary: true,
         workers: new Map([[2, { id: 2, process }]]),
@@ -682,7 +690,7 @@ test('receiving IPC traffic does not stamp the receiving node or worker as its o
     initIPC(server, new Map());
     const source = createWorker(7, []);
     const receive = cluster.listeners('message').at(-1);
-    await receive(source, { method: 'object.read', organization_id: 'org', uuid: 'relayed', serverId: 'original-node' });
+    await receive(source, serialize({ method: 'object.read', organization_id: 'org', uuid: 'relayed', serverId: 'original-node' }));
     const reply = source.responses[0];
     assert.equal(reply.serverId, 'original-node');
     assert.equal('workerId' in reply, false);
