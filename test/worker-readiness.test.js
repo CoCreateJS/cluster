@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events';
 import Config from '@cocreate/config';
 import IPC from '../src/send/ipc.js';
 import State from '../src/state.js';
-import { serialize, deserialize } from '@cocreate/socket/binary';
+import { encode, decode } from '@cocreate/coson';
 
 test('worker readiness travels through IPC and is applied by State', async t => {
     const clusterListeners = new Map(['message', 'exit'].map(event => [event, cluster.listeners(event)]));
@@ -42,11 +42,11 @@ test('worker readiness travels through IPC and is applied by State', async t => 
     server.send = IPC.init(server, new Map());
 
     const responses = [];
-    const worker = { id: 19, process: { id: 19, send: bytes => responses.push(deserialize(bytes)) } };
-    cluster.emit('message', worker, serialize({
+    const worker = { id: 19, process: { id: 19, send: bytes => responses.push(decode(bytes, { operators: false })) } };
+    cluster.emit('message', worker, encode({
         method: 'worker.listening', state: true, workerId: 2,
         serverId: 'node-1', uuid: 'readiness-1'
-    }));
+    }, { operators: false }));
 
     for (let i = 0; i < 10 && !responses.length; i++) await new Promise(resolve => setImmediate(resolve));
     assert.equal(record.isListening, true);

@@ -6,7 +6,10 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import IPC from '../src/send/ipc.js';
-import { serialize, deserialize } from '@cocreate/socket/binary';
+import { encode, decode } from '@cocreate/coson';
+
+const toFrame = message => encode(message, { operators: false });
+const fromFrame = frame => decode(frame, { operators: false });
 
 const eventAPI = `
     server.emitAsync = async (event, payload) => {
@@ -24,7 +27,7 @@ test('real workers reply consistently with async results, errors and ignored ret
         import cluster from 'node:cluster';
         import { EventEmitter } from 'node:events';
         import IPC from ${JSON.stringify(new URL('../src/send/ipc.js', import.meta.url).href)};
-        import { serialize } from ${JSON.stringify(new URL('../node_modules/@cocreate/socket/src/binary.js', import.meta.url).href)};
+        import { encode } from ${JSON.stringify(new URL('../../coson/src/index.js', import.meta.url).href)};
         const server = new EventEmitter();
         Object.assign(server, { id: 'node', cluster_id: 'origin-cluster', isPrimary: false, isWorker: true, workerId: cluster.worker.id });
         ${eventAPI}
@@ -37,7 +40,8 @@ test('real workers reply consistently with async results, errors and ignored ret
         });
         server.on('example.fail', () => { throw new Error('expected operation error'); });
         server.on('example.sideEffect', payload => ({ ...payload, result: ++effects }));
-        process.send(serialize({ ready: true }));
+        server.on('example.preserve', payload => ({ ...payload, result: payload.value }));
+        process.send(encode({ ready: true }, { operators: false }));
     `);
     cluster.setupPrimary({ exec: filename, execArgv: [], serialization: 'advanced' });
     const children = [cluster.fork(), cluster.fork()];
@@ -57,7 +61,7 @@ test('real workers reply consistently with async results, errors and ignored ret
         }
         await rm(directory, { recursive: true, force: true });
     });
-    await Promise.all(children.map(async worker => deserialize((await once(worker, 'message'))[0])));
+    await Promise.all(children.map(async worker => fromFrame((await once(worker, 'message'))[0])));
     const server = new EventEmitter();
     Object.assign(server, { id: 'node', cluster_id: 'origin-cluster', isPrimary: true, workers: new Map(children.map(worker => [worker.id, worker])),
         cluster: { send() { assert.fail('This test only uses IPC'); } } });
@@ -83,19 +87,34 @@ test('real workers reply consistently with async results, errors and ignored ret
     assert.equal(failed.error, 'expected operation error');
     assert.equal(pending.size, 0);
 
+    const prepared = {
+        method: 'example.preserve', master: false, worker: children[0].id,
+        value: { created: { $date: 1700000000123 }, label: '日本語 🌱', image: '$binary[0]' },
+        $binary: [{ $Uint8Array: new Uint8Array([0, 1, 127, 255]) }]
+    };
+    const preparedBeforeEncoding = structuredClone(prepared);
+    toFrame(prepared);
+    assert.deepEqual(prepared, preparedBeforeEncoding, 'CoSON encoding preserves its prepared input');
+    const preserved = await server.send(prepared);
+    assert.deepEqual(preserved.result.created, { $date: 1700000000123 });
+    assert.equal(preserved.result.label, '日本語 🌱');
+    assert.equal(preserved.result.image, '$binary[0]');
+    assert.deepEqual([...preserved.$binary[0].$Uint8Array], [0, 1, 127, 255]);
+    assert.equal(pending.size, 0);
+
     // Caller discards the send Promise; the transport still clears correlation.
     const received = once(children[0], 'message');
     server.send({ method: 'example.work', master: false, worker: children[0].id, value: 7 });
-    assert.equal(deserialize((await received)[0]).result, 14);
+    assert.equal(fromFrame((await received)[0]).result, 14);
     assert.equal(pending.size, 0);
 
     // Unknown/duplicate response envelopes must never execute their method.
-    children[0].send(serialize({ method: 'example.sideEffect', uuid: 'late-response', response: true }));
+    children[0].send(toFrame({ method: 'example.sideEffect', uuid: 'late-response', response: true }));
     const effect = await server.send({ method: 'example.sideEffect', master: false, worker: children[0].id });
     assert.equal(effect.result, 1);
 
     const replies = new Set();
-    const observe = (worker, bytes) => { if (deserialize(bytes).uuid === 'broadcast-request') replies.add(worker.id); };
+    const observe = (worker, bytes) => { if (fromFrame(bytes).uuid === 'broadcast-request') replies.add(worker.id); };
     cluster.on('message', observe);
     const broadcast = await server.send({ method: 'example.work', uuid: 'broadcast-request', master: false,
         broadcast: true, value: 3, broadcastSender: false });

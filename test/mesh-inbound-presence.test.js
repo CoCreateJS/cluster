@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
+import { BinaryReceiver } from '@cocreate/socket/binary';
+import { decode } from '@cocreate/coson';
 import { ServerMesh } from '../src/send/socket/index.js';
 
 async function setup(t) {
@@ -19,7 +21,15 @@ async function setup(t) {
         const accepted = once(inbound.meshWss, 'connection');
         const client = new WebSocket(`wss://127.0.0.1:${port}${path}`, [encodeURIComponent(JSON.stringify({ id: 'peer' }))], { rejectUnauthorized: false });
         client.on('error', () => {});
-        if (onMessage) client.on('message', data => onMessage(JSON.parse(data)));
+        if (onMessage) {
+            const receiver = new BinaryReceiver();
+            client.on('message', data => {
+                const complete = receiver.push(data);
+                if (!complete) return;
+                try { onMessage(decode(complete, { operators: false })); }
+                finally { receiver.release(complete); }
+            });
+        }
         await once(client, 'open');
         const [socket] = await accepted;
         return { client, socket };

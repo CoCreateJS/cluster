@@ -302,6 +302,23 @@ callers own that metadata. Destination `server`, `worker`, and `cluster` fields
 remain separate from origin IDs. Socket Server no longer needs a forwarding-loop
 flag.
 
+### CoSON transport representation
+
+Cluster encodes every IPC and peer Socket message with
+`encode(message, { operators: false })` and decodes every received frame with
+`decode(frame, { operators: false })`. Messages must already use CoSON's
+prepared operator representation. Cluster preserves operators and root
+`$binary` descriptors; it does not construct native dates, typed arrays, or
+other application values. Application code and the AST engine own preparation
+and any later reconstruction.
+
+Peer Socket transport carries the CoSON frame as binary. The existing Socket
+chunk framing operates on those raw frame bytes and reassembles them before
+decode. IPC sends the same CoSON byte frame directly using Node's advanced
+serialization; it does not add application chunking. Primary and worker
+forwarding therefore retain the same prepared representation across IPC and
+Mesh routes.
+
 ### Status Events
 
 ```javascript

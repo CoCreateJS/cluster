@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import IPC from '../src/send/ipc.js';
 import { initializeServerDB } from '@cocreate/db';
-import { deserialize } from '@cocreate/socket/binary';
+import { decode } from '@cocreate/coson';
 
 test('real worker IPC awaits primary CRUD, preserves concurrent updates, and returns errors', { timeout: 30000 }, async t => {
     const directory = await mkdtemp(join(tmpdir(), 'coc-db-real-ipc-'));
@@ -24,7 +24,9 @@ test('real worker IPC awaits primary CRUD, preserves concurrent updates, and ret
     const pending = new Map();
     server.send = IPC.init(server, pending);
     const db = initializeServerDB(server, { directory });
-    cluster.setupPrimary({ exec: fileURLToPath(new URL('./fixtures/db-ipc-worker.mjs', import.meta.url)), silent: true });
+    cluster.setupPrimary({ ...cluster.settings,
+        exec: fileURLToPath(new URL('./fixtures/db-ipc-worker.mjs', import.meta.url)),
+        silent: true, serialization: 'advanced' });
     t.after(async () => {
         await db.close();
         await Promise.all([...server.workers.values()].map(async record => {
@@ -42,7 +44,7 @@ test('real worker IPC awaits primary CRUD, preserves concurrent updates, and ret
         const worker = cluster.fork({ COCREATE_TEST_WORKER_ID: String(id), COCREATE_TEST_DB_DIRECTORY: join(directory, 'no-worker-db') });
         server.workers.set(id, { id, process: worker });
         const ready = await new Promise(resolve => worker.on('message', bytes => {
-            const payload = deserialize(bytes);
+            const payload = decode(bytes, { operators: false });
             if (payload.fixtureReady) resolve(payload);
         }));
         assert.deepEqual(ready.driverKeys, ['send']);

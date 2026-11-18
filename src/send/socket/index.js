@@ -15,9 +15,32 @@
 
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
-import { BinaryReceiver, deserialize, sendBinary } from '@cocreate/socket/binary';
+import { BinaryReceiver, createFrames, getChunkSize } from '@cocreate/socket/binary';
+import { encode, decode } from '@cocreate/coson';
 import { ServerMeshInbound } from './inbound.js';
 import { ServerMeshOutbound } from './outbound.js';
+
+function asUint8Array(value) {
+    if (value instanceof Uint8Array) return value;
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    throw new TypeError('Socket message must be a binary CoSON frame.');
+}
+
+async function sendFrame(socket, frame) {
+    const chunkSize = getChunkSize();
+    const bufferedLimit = Math.max(chunkSize * 2, 128 * 1024);
+    for (const chunk of createFrames(frame, chunkSize)) {
+        while ((socket.bufferedAmount || 0) > bufferedLimit)
+            await new Promise(resolve => setTimeout(resolve, 10));
+        await new Promise((resolve, reject) => {
+            try {
+                if (socket.send.length >= 2) socket.send(chunk, error => error ? reject(error) : resolve());
+                else { socket.send(chunk); resolve(); }
+            } catch (error) { reject(error); }
+        });
+    }
+}
 
 /**
  * ServerMesh orchestrates multi-tenant routing, unified IPC event forwarding,
@@ -242,7 +265,7 @@ export class ServerMesh extends EventEmitter {
             const { organization_id, data } = message;
             if (!this.server || !organization_id || !data) return;
 
-            const payload = typeof data === 'string' ? JSON.parse(data) : data;
+            const payload = data;
             this.server.send({
                 ...payload,
                 organization_id,
@@ -269,7 +292,7 @@ export class ServerMesh extends EventEmitter {
                         method: 'mesh.inbound',
                         broadcast: true,
                         master: false,
-                        data: JSON.stringify(message)
+                        data: message
                     });
                 } catch (err) {
                     console.error("[@cocreate/server-mesh] Failed to relay raw fallback message:", err.message);
@@ -292,7 +315,7 @@ export class ServerMesh extends EventEmitter {
             const receiver = ws.binaryReceiver ||= new BinaryReceiver();
             const complete = receiver.push(rawData);
             if (!complete) return;
-            try { message = deserialize(complete); }
+            try { message = decode(asUint8Array(complete), { operators: false }); }
             finally { receiver.release(complete); }
         } catch (err) {
             console.error('[@cocreate/server-mesh] Invalid binary peer message:', err.message);
@@ -424,6 +447,7 @@ export class ServerMesh extends EventEmitter {
         const targetSockets = Array.isArray(sockets) ? sockets : [sockets];
 
         if (this.isClosed) return;
+        const frame = encode(data, { operators: false });
         const peers = new Set();
         for (const socket of targetSockets) {
             if (!socket) continue;
@@ -434,7 +458,7 @@ export class ServerMesh extends EventEmitter {
             if (key === undefined) {
                 try {
                     if (socket.readyState === 1) {
-                        void sendBinary(socket, data).catch(err => {
+                        void sendFrame(socket, frame).catch(err => {
                             console.error('[@cocreate/server-mesh] Anonymous socket send failed:', err.message);
                         });
                     }
@@ -445,7 +469,7 @@ export class ServerMesh extends EventEmitter {
             }
             let queue = this.messageQueues.get(key);
             if (!queue) this.messageQueues.set(key, queue = []);
-            queue.push(data);
+            queue.push({ payload: data, frame });
             void this.flushMessageQueue(socket);
         }
     }
@@ -463,7 +487,7 @@ export class ServerMesh extends EventEmitter {
         socket.meshSending = true;
         try {
             while (queue.length && socket.readyState === 1) {
-                await sendBinary(socket, queue[0]);
+                await sendFrame(socket, queue[0].frame);
                 queue.shift();
             }
         } catch (err) {
@@ -476,7 +500,7 @@ export class ServerMesh extends EventEmitter {
 
     async peerUnavailable(socket, details) {
         const key = this.messageQueueKey(socket);
-        const queuedMessages = [...(this.messageQueues.get(key) || [])];
+        const queuedMessages = (this.messageQueues.get(key) || []).map(message => message.payload);
         this.messageQueues.delete(key);
         const report = {
             id: crypto.randomUUID(),

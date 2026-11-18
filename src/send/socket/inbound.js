@@ -246,7 +246,7 @@ export class ServerMeshInbound {
                     broadcast: payload.broadcast ?? true,
                     worker: payload.worker,
                     master: false,
-                    data: typeof payload.data === 'string' ? payload.data : JSON.stringify(payload.data)
+                    data: payload.data
                 });
             } catch (err) {
                 console.error("[@cocreate/server-mesh/inbound] Failed to relay inbound message to workers:", err.message);

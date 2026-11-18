@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
+import { BinaryReceiver } from '@cocreate/socket/binary';
+import { decode } from '@cocreate/coson';
 import { ServerMesh } from '../src/send/socket/index.js';
 import { ServerMeshOutbound } from '../src/send/socket/outbound.js';
 
@@ -26,7 +28,14 @@ function setup(t) {
     const sockets = [];
     class Socket extends EventEmitter {
         constructor() { super(); this.readyState = 0; this.sent = []; sockets.push(this); }
-        send(data) { this.sent.push(JSON.parse(data)); }
+        send(bytes) {
+            const complete = this.binaryReceiver ||= new BinaryReceiver();
+            const frame = complete.push(bytes);
+            if (frame) {
+                try { this.sent.push(decode(frame, { operators: false })); }
+                finally { complete.release(frame); }
+            }
+        }
         open() { this.readyState = 1; this.emit('open'); }
         close(code) { this.readyState = 3; this.emit('close', code); }
     }
@@ -63,16 +72,25 @@ test('connecting and disconnected messages replay in FIFO order on the replaceme
     assert.equal(mesh.messageQueues.size, 0);
 });
 
-test('a prepared replication frame is queued without serializing its value again', t => {
+test('prepared operators remain intact while queued and sent', t => {
     const { mesh, sockets } = setup(t);
-    let encodings = 0;
     const message = { method: 'db.partition.update', server: 'peer', uuid: 'prepared',
-        value: { toJSON() { encodings++; return { entries: [[1, 'object']] }; } } };
-    const encoded = JSON.stringify(message);
-    mesh.send(message, encoded);
+        created: { $date: 1700000000000 },
+        image: '$binary[0]', thumbnail: '$binary[1]', label: '日本語 🌱',
+        $binary: [
+            { $Uint8Array: new Uint8Array(96 * 1024).fill(7) },
+            { $Uint16Array: new Uint16Array([11, 22, 33]) }
+        ] };
+    const originalImage = [...message.$binary[0].$Uint8Array];
+    mesh.send(message);
+    message.label = 'mutated after send';
     sockets[0].open();
-    assert.equal(encodings, 1);
-    assert.deepEqual(sockets[0].sent[0].value.entries, [[1, 'object']]);
+    assert.deepEqual(sockets[0].sent[0].created, { $date: 1700000000000 });
+    assert.deepEqual([...sockets[0].sent[0].$binary[0].$Uint8Array], originalImage);
+    assert.deepEqual([...sockets[0].sent[0].$binary[1].$Uint16Array], [11, 22, 33]);
+    assert.equal(sockets[0].sent[0].image, '$binary[0]');
+    assert.equal(sockets[0].sent[0].thumbnail, '$binary[1]');
+    assert.equal(sockets[0].sent[0].label, '日本語 🌱');
 });
 
 test('intentional closure discards pending messages and does not retry', t => {
@@ -124,7 +142,7 @@ test('a synchronous send failure retains the unsent message ahead of subsequent 
     assert.equal(mesh.messageQueues.size, 0);
 });
 
-test('broadcast recipients each retain one independent queue and preserve the serialized envelope', t => {
+test('broadcast recipients each retain one independent queue and preserve the encoded envelope', t => {
     const { mesh, sockets } = setup(t);
     mesh.outboundManager.connectPeer({ _id: 'other', ip: '192.0.2.2' });
     const message = { method: 'example', value: 1 };

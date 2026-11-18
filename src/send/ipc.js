@@ -19,7 +19,7 @@
 import cluster from 'node:cluster';
 import { getDistribution } from '@cocreate/utils/distribution';
 import { uuid } from '@cocreate/utils';
-import { serialize, deserialize } from '@cocreate/socket/binary';
+import { encode, decode } from '@cocreate/coson';
 
 const presenceEvents = ['orgConnected', 'orgDisconnected'];
 const masterControls = ['restart', 'reboot', 'shutdown'];
@@ -34,13 +34,20 @@ const organizationDelivery = payload => Boolean(payload.organization_id &&
 /** IPC owns request/reply correlation; callers always receive the envelope. */
 export function init(server, pendingPromises) {
     if (server.isPrimary && !cluster.isWorker && Object.keys(cluster.workers).length === 0) {
-        cluster.setupPrimary({ serialization: 'advanced' });
+        cluster.setupPrimary({ ...cluster.settings, serialization: 'advanced' });
     }
     const organizationWorkers = server.organizationWorkers ||= new Map();
 
-    function transportEnvelope(payload) { return serialize(payload); }
+    function transportEnvelope(payload) { return encode(payload, { operators: false }); }
 
-    function decodeEnvelope(payload) { return deserialize(payload); }
+    function decodeEnvelope(payload) {
+        if (payload instanceof Uint8Array) return decode(payload, { operators: false });
+        if (payload instanceof ArrayBuffer) return decode(new Uint8Array(payload), { operators: false });
+        if (ArrayBuffer.isView(payload)) {
+            return decode(new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength), { operators: false });
+        }
+        throw new TypeError('IPC message must be a binary CoSON frame.');
+    }
 
     function request(send, payload, key, workerId) {
         return new Promise((resolve, reject) => {
