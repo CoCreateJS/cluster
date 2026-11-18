@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
-import { ServerMesh } from '../src/mesh/index.js';
-import { ServerMeshOutbound } from '../src/mesh/outbound.js';
+import { ServerMesh } from '../src/send/socket/index.js';
+import { ServerMeshOutbound } from '../src/send/socket/outbound.js';
 
 test('control peers announce connection and immediate disconnection without duplicate close events', () => {
     const mesh = new ServerMesh();

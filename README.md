@@ -17,7 +17,6 @@ For a complete guide, deployment examples, and API reference, visit the **CoCrea
 - [Ingress & Connection Controls](#ingress--connection-controls)
 - [Process & OS Lifecycle Management](#process--os-lifecycle-management)
 - [IPC Transport Engine](#ipc-transport-engine)
-- [Reactive Cluster Storage Manager](#reactive-cluster-storage-manager)
 - [Distributed Cluster Orchestration](#distributed-cluster-orchestration)
 - [Targeting Matrix & Routing Directives](#targeting-matrix--routing-directives)
 - [Self-Healing & Jittered Reconnection Logic](#self-healing--jittered-reconnection-logic)
@@ -82,8 +81,8 @@ When every worker enters draining or cordoned mode, the Primary process automati
 | Module | Purpose |
 | --- | --- |
 | `index.js` | Primary server orchestrator |
-| `ipc.js` | Inter-process communication engine |
-| `storage.js` | Cluster-wide reactive storage |
+| `send/ipc.js` | Inter-process communication engine |
+| `send/socket/` | Inter-server communication |
 | `getDeployment.js` | Infrastructure detection |
 | `getIp.js` | Public and private IP resolution |
 
@@ -97,7 +96,7 @@ The server composes multiple standalone CoCreate modules into a unified runtime.
 | --- | --- |
 | `@cocreate/certificates` | TLS certificate management |
 | `@cocreate/socket` | WebSocket server |
-| `cluster/src/mesh` | Inter-server communication |
+| `cluster/src/send/socket` | Inter-server communication |
 | `@cocreate/crud` | Database routing |
 | `@cocreate/autoscaler` | Automatic scaling |
 | `@cocreate/telemetry` | Monitoring and metrics |
@@ -231,7 +230,6 @@ Every server instance extends Node.js `EventEmitter`.
 | `workers.size` | Live tracked child-process count |
 | `workers` | ID-keyed `Workers` Map with local lifecycle methods |
 | `state` | Current server state |
-| `storage` / `store` | Reactive cluster storage |
 | `send()` | Server-side IPC and mesh message dispatcher |
 
 ### Local worker collection
@@ -269,7 +267,7 @@ The existing persisted/telemetry `totalWorkers` field derives from the live Map,
 rather than acting as another runtime counter.
 
 `server.workers` is the local process collection. Mesh is attached as
-`server.cluster`; its implementation remains in `src/mesh/`. The `ClusterManager`
+`server.cluster`; its implementation remains in `src/send/socket/`. The `ClusterManager`
 named export and manager `.workers` view remain compatibility references to the
 worker collection. `server.cluster` no longer aliases workers.
 
@@ -541,56 +539,9 @@ as lifecycle metadata so messages can be routed without duplicate execution.
 
 ---
 
-## Reactive Cluster Storage Manager
-
-Cluster-wide synchronized key/value storage.
-
-```javascript
-await server.storage.set(
-	"node_capacity",
-	{
-		availableSlots: 45
-	}
-);
-
-const capacity =
-	await server.storage.get(
-		"node_capacity"
-	);
-
-const totalKeys =
-	await server.storage.size();
-
-await server.storage.delete(
-	"node_capacity"
-);
-
-await server.storage.clear();
-```
-
-Reactive listeners:
-
-```javascript
-server.storage.on(
-	"change:node_capacity",
-	(newValue) => {
-		console.log(newValue);
-	}
-);
-
-server.storage.on(
-	"delete:node_capacity",
-	() => {
-		console.log("Deleted");
-	}
-);
-```
-
----
-
 ## Distributed Cluster Orchestration
 
-Cluster owns its inter-server mesh implementation in `src/mesh`.
+Cluster owns its inter-server mesh implementation in `src/send/socket`.
 
 ```javascript
 server.cluster.send({

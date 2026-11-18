@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter, once } from 'node:events';
 import { WebSocket, WebSocketServer } from 'ws';
-import { ServerMesh } from '../src/mesh/index.js';
-import { ServerMeshOutbound } from '../src/mesh/outbound.js';
+import { ServerMesh } from '../src/send/socket/index.js';
+import { ServerMeshOutbound } from '../src/send/socket/outbound.js';
 
 function setup(t) {
     const sockets = [];

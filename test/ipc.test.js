@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import cluster from 'node:cluster';
 import test from 'node:test';
 
-import IPC from '../src/ipc.js';
+import IPC from '../src/send/ipc.js';
 import { serialize, deserialize } from '@cocreate/socket/binary';
 
 function emitIPCMessage(worker, payload) {

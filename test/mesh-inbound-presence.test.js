@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
-import { ServerMesh } from '../src/mesh/index.js';
+import { ServerMesh } from '../src/send/socket/index.js';
 
 async function setup(t) {
     t.mock.method(console, 'log', () => {});

@@ -6,7 +6,7 @@ import cluster from 'node:cluster';
 import Config from '@cocreate/config';
 import { SocketClient, SocketServer } from '@cocreate/socket';
 import { serialize, deserialize } from '@cocreate/socket/binary';
-import IPC from '../src/ipc.js';
+import IPC from '../src/send/ipc.js';
 
 test('a real socket response uses server.send once and fans out without socket forwarding', { timeout: 5000 }, async t => {
     const processEvents = ['message', 'orgConnected', 'orgDisconnected', 'socket.destroyAll', 'socket.destroyOrgs', 'organization.balance'];

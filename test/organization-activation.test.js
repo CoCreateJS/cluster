@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ServerMesh } from '../src/mesh/index.js';
+import { ServerMesh } from '../src/send/socket/index.js';
 
 const tenant = 'aaaaaaaaaaaaaaaaaaaaaaaa';
 const flush = () => new Promise(resolve => setImmediate(resolve));

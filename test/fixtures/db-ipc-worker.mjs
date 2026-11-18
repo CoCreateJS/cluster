@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { performance } from 'node:perf_hooks';
-import IPC from '../src/ipc.js';
+import IPC from '../src/send/ipc.js';
 import { initializeServerDB } from '@cocreate/db';
 import { serialize } from '@cocreate/socket/binary';
 

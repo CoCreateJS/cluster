@@ -5,8 +5,7 @@ import { EventEmitter, once } from 'node:events';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import IPC from '../src/ipc.js';
-import Storage from '../src/storage.js';
+import IPC from '../src/send/ipc.js';
 import { serialize, deserialize } from '@cocreate/socket/binary';
 
 const eventAPI = `
@@ -24,15 +23,13 @@ test('real workers reply consistently with async results, errors and ignored ret
     await writeFile(filename, `
         import cluster from 'node:cluster';
         import { EventEmitter } from 'node:events';
-        import IPC from ${JSON.stringify(new URL('../src/ipc.js', import.meta.url).href)};
-        import Storage from ${JSON.stringify(new URL('../src/storage.js', import.meta.url).href)};
+        import IPC from ${JSON.stringify(new URL('../src/send/ipc.js', import.meta.url).href)};
         import { serialize } from ${JSON.stringify(new URL('../node_modules/@cocreate/socket/src/binary.js', import.meta.url).href)};
         const server = new EventEmitter();
         Object.assign(server, { id: 'node', cluster_id: 'origin-cluster', isPrimary: false, isWorker: true, workerId: cluster.worker.id });
         ${eventAPI}
         const pending = new Map();
         server.send = IPC.init(server, pending);
-        const storage = Storage.init(server);
         let effects = 0;
         server.on('example.work', async payload => {
             await new Promise(resolve => setTimeout(resolve, 10));
@@ -40,10 +37,6 @@ test('real workers reply consistently with async results, errors and ignored ret
         });
         server.on('example.fail', () => { throw new Error('expected operation error'); });
         server.on('example.sideEffect', payload => ({ ...payload, result: ++effects }));
-        server.on('example.storage', async payload => {
-            await storage.set('shared', payload.value);
-            return { ...payload, result: await storage.get('shared'), pending: pending.size };
-        });
         process.send(serialize({ ready: true }));
     `);
     cluster.setupPrimary({ exec: filename, execArgv: [], serialization: 'advanced' });
@@ -74,7 +67,6 @@ test('real workers reply consistently with async results, errors and ignored ret
         return replies.find(reply => reply?.uuid === payload.uuid) || payload;
     };
     server.send = IPC.init(server, pending);
-    Storage.init(server);
     for (const broadcastSender of [undefined, false, true]) {
         const response = await server.send({ method: 'example.work', master: false,
             worker: children[0].id, value: 21, broadcastSender });
@@ -101,11 +93,6 @@ test('real workers reply consistently with async results, errors and ignored ret
     children[0].send(serialize({ method: 'example.sideEffect', uuid: 'late-response', response: true }));
     const effect = await server.send({ method: 'example.sideEffect', master: false, worker: children[0].id });
     assert.equal(effect.result, 1);
-
-    const stored = await server.send({ method: 'example.storage', master: false, worker: children[0].id, value: 'shared-value' });
-    assert.equal(stored.result, 'shared-value');
-    assert.equal(stored.pending, 0);
-    assert.equal(pending.size, 0);
 
     const replies = new Set();
     const observe = (worker, bytes) => { if (deserialize(bytes).uuid === 'broadcast-request') replies.add(worker.id); };

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import IPC from '../src/ipc.js';
+import IPC from '../src/send/ipc.js';
 import { initializeServerDB } from '@cocreate/db';
 import { deserialize } from '@cocreate/socket/binary';
 
@@ -24,7 +24,7 @@ test('real worker IPC awaits primary CRUD, preserves concurrent updates, and ret
     const pending = new Map();
     server.send = IPC.init(server, pending);
     const db = initializeServerDB(server, { directory });
-    cluster.setupPrimary({ exec: fileURLToPath(new URL('../fixtures/db-ipc-worker.mjs', import.meta.url)), silent: true });
+    cluster.setupPrimary({ exec: fileURLToPath(new URL('./fixtures/db-ipc-worker.mjs', import.meta.url)), silent: true });
     t.after(async () => {
         await db.close();
         await Promise.all([...server.workers.values()].map(async record => {

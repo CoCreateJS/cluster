@@ -18,7 +18,7 @@
 
 import { EventEmitter } from 'node:events';
 
-import ServerMesh from './mesh/index.js';
+import { SocketMesh as ServerMesh, IPC } from './send/index.js';
 import Config from '@cocreate/config';
 
 import { ObjectId, getClientInfo } from '@cocreate/utils';
@@ -27,8 +27,6 @@ import getDeployment from './getDeployment.js';
 import Manager from './manager.js';
 import Fetch from './fetch.js';
 import http from './http.js';
-import IPC from './ipc.js';
-import Storage from './storage.js';
 import State from './state.js';
 import Log from '@cocreate/log';
 import ApiKey from './apikey.js';
@@ -64,8 +62,6 @@ export class CoCreateServer {
         this.isPrimary = this.workers.isPrimary;
         this.isWorker = !this.isPrimary;
 
-        // Initialize reactive cluster storage bound to cluster IPC promises
-        this.storage = Storage.init(this, this.workers.pendingPromises);
         this.send = IPC.init(this, this.workers.pendingPromises);
     }
 

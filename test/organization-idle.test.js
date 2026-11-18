@@ -6,8 +6,8 @@ import { setImmediate } from 'node:timers/promises';
 import config from '@cocreate/config';
 import { init as initAutoscaler } from '../../autoscaler/src/index.js';
 import { SocketServer } from '../../socket/src/index.js';
-import IPC from '../src/ipc.js';
-import { ServerMesh } from '../src/mesh/index.js';
+import IPC from '../src/send/ipc.js';
+import { ServerMesh } from '../src/send/socket/index.js';
 
 async function setup(t, { minimum = 0, enabled = true, workers = 1, telemetry = true } = {}) {
     t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
