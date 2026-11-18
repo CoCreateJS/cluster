@@ -4,7 +4,6 @@ import { EventEmitter } from 'node:events';
 import cluster from 'node:cluster';
 import os from 'node:os';
 import Workers from '../src/workers.js';
-import { serialize, deserialize } from '@cocreate/socket/binary';
 
 function setup(t, count = 2) {
     const original = new Set(cluster.listeners('exit'));
@@ -34,12 +33,11 @@ function setup(t, count = 2) {
     };
     const workers = new Workers(server);
     server.workers = workers;
+    server.send = payload => { calls.push(['server.send', payload]); return Promise.resolve(payload); };
     workers.configureWorkers(count);
     const exit = async (worker, code = 0) => cluster.listeners('exit').at(-1)(worker, code, null);
     return { workers, server, forks, calls, exit };
 }
-const flush = () => new Promise(resolve => setImmediate(resolve));
-
 test('add returns the ID-keyed tracked record and Map reads retain their interface', t => {
     const { workers, forks } = setup(t);
     const record = workers.add();
@@ -111,8 +109,8 @@ test('delete requests graceful shutdown once, keeps tracking until exit, and sup
     workers.delete(record.id);
     assert.equal(workers.get(record.id), record);
     assert.equal(workers.size, 1);
-    assert.deepEqual(calls.filter(Array.isArray).map(([method, bytes]) => [method, deserialize(bytes)]),
-        [['send', { method: 'shutdown', master: false, worker: record.id, server: 'node-1' }]]);
+    assert.deepEqual(calls.filter(Array.isArray),
+        [['server.send', { method: 'shutdown', master: false, worker: record.id, server: 'node-1' }]]);
     await exit(record.process);
     assert.equal(workers.size, 0);
     t.mock.timers.tick(2000);
@@ -122,6 +120,7 @@ test('delete requests graceful shutdown once, keeps tracking until exit, and sup
 test('delete falls back to a graceful signal when IPC is unavailable', async t => {
     const { workers, calls, exit } = setup(t);
     const record = workers.add();
+    delete workers.server.send;
     record.process.send = () => { throw new Error('channel closed'); };
     workers.delete(record.id);
     assert(calls.some(item => Array.isArray(item) && item[0] === 'kill' && item[1] === 'SIGTERM'));
@@ -141,14 +140,12 @@ test('clear uses lifecycle deletion rather than dropping live process references
     assert.equal(forks.length, 2);
 });
 
-test('unexpected exits respawn with the same ID, environment, and readiness handling', async t => {
+test('unexpected exits respawn with the same ID and environment', async t => {
     const { workers, forks, calls, exit } = setup(t);
     const first = workers.add({ FEATURE: 'enabled' });
     workers.add();
-    forks[1].worker.emit('message', serialize({ type: 'listening_state', state: true }));
-    first.process.emit('message', serialize({ type: 'listening_state', state: true }));
-    await flush();
-    assert(calls.includes('repository'));
+    workers.setListening(1, true);
+    workers.setListening(2, true);
     await exit(first.process, 1);
     assert.equal(workers.size, 1);
     t.mock.timers.tick(1999);
@@ -157,9 +154,8 @@ test('unexpected exits respawn with the same ID, environment, and readiness hand
     assert.equal(forks.length, 3);
     assert.equal(forks[2].env.WORKER_ID, String(first.id));
     assert.equal(forks[2].env.FEATURE, 'enabled');
-    forks[2].worker.emit('message', serialize({ type: 'listening_state', state: true }));
-    await flush();
-    assert.equal(calls.filter(item => item === 'repository').length, 2);
+    assert.equal(workers.get(first.id).isListening, false);
+    assert.equal(calls.includes('repository'), false);
 });
 
 test('delete cancels a pending replacement after an unexpected exit', async t => {
@@ -225,15 +221,12 @@ test('delete during exit persistence also suppresses the pending crash replaceme
 });
 
 
-test('a readiness message arriving after delete cannot republish the stopping worker', async t => {
-    const { workers, calls } = setup(t);
+test('readiness updates after delete cannot mark the stopping worker as listening', t => {
+    const { workers } = setup(t);
     const record = workers.add();
     workers.delete(record.id);
-    record.process.emit('message', serialize({ type: 'listening_state', state: true }));
-    await flush();
+    workers.setListening(record.id, true);
     assert.equal(record.isListening, false);
-    assert.equal(calls.includes('running'), false);
-    assert.equal(calls.includes('repository'), false);
 });
 
 

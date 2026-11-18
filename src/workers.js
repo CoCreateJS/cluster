@@ -20,7 +20,6 @@ import { EventEmitter } from 'node:events';
 import cluster from 'node:cluster';
 import os from 'node:os';
 import State from './state.js';
-import { serialize, deserialize } from '@cocreate/socket/binary';
 
 /**
  * Tracks local Node.js worker processes by logical ID and owns fork, readiness,
@@ -94,30 +93,11 @@ export class Workers extends Map {
         this.server.isWorker = this.isWorker;
     }
 
-    #handleWorkerListeningMsg(workerId, bytes) {
-        const msg = deserialize(bytes);
-        if (msg && msg.type === 'listening_state') {
-            const w = this.get(workerId);
-            if (w && !this.#deleting.has(workerId)) {
-                w.isListening = Boolean(msg.state);
-                if (this.server.state?.evaluateMasterFallback) {
-                    this.server.state.evaluateMasterFallback();
-                }
-
-                const workersReady = this.size > 0 &&
-                    [...this.values()].every((item) => item.isListening);
-                if (workersReady && this.server.state?.save) {
-                    this.server.state.save('running').then(async () => {
-                        await this.server.repository?.publish();
-                    }).catch((error) => {
-                        console.error(
-                            '[@cocreate/cluster] Failed to publish master readiness or initial repository data:',
-                            error.message
-                        );
-                    });
-                }
-            }
-        }
+    setListening(workerId, isListening) {
+        const worker = this.get(workerId);
+        if (!worker || this.#deleting.has(workerId)) return;
+        worker.isListening = Boolean(isListening);
+        return worker;
     }
 
     async #handleWorkerExit(worker, code, signal) {
@@ -227,13 +207,12 @@ export class Workers extends Map {
         record.isListening = false;
         this.server.state?.evaluateMasterFallback?.();
         const stop = () => record.process.kill('SIGTERM');
-        try {
-            record.process.send(serialize({ method: 'shutdown', master: false, worker: workerId, server: this.server.id }), error => {
-                if (error) stop();
-            });
-        } catch {
+        if (typeof this.server.send !== 'function') {
             stop();
+            return;
         }
+        this.server.send({ method: 'shutdown', master: false, worker: workerId, server: this.server.id })
+            .catch(stop);
     }
 
     /** Clear the managed collection through the same worker shutdown lifecycle. */
@@ -258,7 +237,6 @@ export class Workers extends Map {
         worker.on('error', error => {
             console.error(`[@cocreate/cluster] [MASTER] Error on Worker ${workerId}:`, error.message);
         });
-        worker.on('message', message => this.#handleWorkerListeningMsg(workerId, message));
         const record = {
             id: workerId,
             pid: worker.process.pid,

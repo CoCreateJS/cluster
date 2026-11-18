@@ -1,7 +1,6 @@
 import Http from 'node:http';
 import Https from 'node:https';
 import { uuid } from '@cocreate/utils';
-import { serialize } from '@cocreate/socket/binary';
 
 /**
  * Initializes the HTTP and HTTPS listeners on the server context.
@@ -33,8 +32,9 @@ async function init(server) {
     server.socket?.attach();
 
     const reportListening = state => {
-        if (process.connected) {
-            process.send(serialize({ type: 'listening_state', state }));
+        if (process.connected && server.send) {
+            Promise.resolve(server.send({ method: 'worker.listening', state }))
+                .catch(error => console.error('[@cocreate/cluster] Failed to report worker listener state:', error.message));
         }
     };
 

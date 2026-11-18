@@ -657,6 +657,28 @@ export function evaluateMasterFallback() {
     }
 }
 
+/** Applies worker listener readiness reported through the normal IPC route. */
+async function handleWorkerListening(payload) {
+    if (!server?.isPrimary) return;
+    const worker = server.workers?.setListening(payload.workerId, payload.state);
+    if (!worker) return;
+
+    evaluateMasterFallback();
+    const workersReady = server.workers.size > 0 &&
+        [...server.workers.values()].every(item => item.isListening);
+    if (!workersReady) return;
+
+    try {
+        await save('running');
+        await server.repository?.publish();
+    } catch (error) {
+        console.error(
+            '[@cocreate/cluster] Failed to publish master readiness or initial repository data:',
+            error.message
+        );
+    }
+}
+
 /**
  * Initializes the StateManager service.
  * 
@@ -673,6 +695,7 @@ export async function init(serverInstance) {
     server.on('shed', payload => shed(payload));
     server.on('drain', payload => drain(payload));
     server.on('restart', payload => restart(payload, true));
+    server.on('worker.listening', handleWorkerListening);
     if (server.isPrimary) {
         server.on('reboot', payload => reboot(payload, true));
         server.on('shutdown', payload => shutdown(payload, true));
