@@ -728,25 +728,29 @@ test('receiving IPC traffic does not stamp the receiving node or worker as its o
     assert.equal('clusterId' in reply, false);
 });
 
-test('CRUD distribution targets only registered workers and returns reads only to the requester', async t => {
-    const { addDistribution } = await import('@cocreate/utils/distribution');
+test('CRUD awareness targets matching workers and returns reads only to the requester', async t => {
+    const { addAwareness } = await import('@cocreate/utils/awareness');
     const received = [], forwarded = [], local = [];
     const server = { id: 'node', workerId: null, isPrimary: true,
         workers: new Map([1, 2, 3].map(id => [id, createWorker(id, received)])),
         organizationWorkers: new Map([['org', new Set([1, 2, 3])]]),
         cluster: { send: data => forwarded.push(data) }, emit() {},
         emitAsync: async (_, data) => { local.push(data); return data; } };
-    server.workers.distribution = new Map();
-    addDistribution(server.workers.distribution, ['document-a'], 1);
-    addDistribution(server.workers.distribution, ['document-a'], 2);
+    server.workers.awareness = new Map();
+    addAwareness(server.workers.awareness, 'org', ['document-a'], 1);
+    addAwareness(server.workers.awareness, 'org', ['document-a'], 2);
     const send = initIPC(server, new Map());
     await send({ method: 'object.update', organization_id: 'org', serverId: 'node', workerId: 1,
-        distributionKeys: ['document-a'], object: [{ _id: 'a', $set: { value: 2 } }] });
+        awareness: ['document-a'], object: [{ _id: 'a', $set: { value: 2 } }] });
     assert.deepEqual(received.map(item => item.id), [2]);
     assert.equal(received[0].payload.object[0].$set.value, 2);
-    assert.equal(forwarded.length, 0, 'DB handles node propagation separately');
+    assert.equal(forwarded.length, 1, 'the primary hands awareness-scoped CRUD to Mesh');
+    assert.deepEqual(forwarded[0].awareness, ['document-a']);
     received.length = 0;
-    await send({ method: 'object.read', organization_id: 'org', serverId: 'node', workerId: 1,
-        distributionKeys: ['document-a'], object: [{ _id: 'a', value: 2 }] });
+    const requester = server.workers.get(1);
+    const receive = cluster.listeners('message').at(-1);
+    await receive(requester, toFrame({ method: 'object.read', organization_id: 'org', serverId: 'node', workerId: 1,
+        awareness: ['document-a'], object: [{ _id: 'a', value: 2 }] }));
     assert.equal(received.length, 0);
+    assert.equal(requester.responses.length, 1, 'the read response returns to its requesting worker');
 });
