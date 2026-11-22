@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter, once } from 'node:events';
 import { WebSocket, WebSocketServer } from 'ws';
-import { SegmentReceiver } from '@cocreate/utils/segments';
-import { decode } from '@cocreate/coson';
+import { decodeSegments } from '@cocreate/coson';
+import { receiveSocketSegment, releaseSocketSegments } from '@cocreate/socket/transport';
 import { ServerMesh } from '../src/send/socket/index.js';
 import { ServerMeshOutbound } from '../src/send/socket/outbound.js';
 
@@ -172,12 +172,12 @@ test('direct Mesh send preserves the envelope without adding local origin IDs', 
     const mesh = new ServerMesh();
     mesh.server = { id: 'relay-node', workerId: 2, cluster_id: 'relay-cluster', isPrimary: true };
     const sent = [];
-    const receiver = new SegmentReceiver();
     mesh.controlSockets = [{ readyState: 1, send: data => {
-        const complete = receiver.push(data);
-        if (!complete) return;
-        try { sent.push(decode(complete, { operators: false })); }
-        finally { receiver.release(complete); }
+        const complete = receiveSocketSegment(mesh.controlSockets[0], data, typeof data !== 'string');
+        if (complete) {
+            try { sent.push(decodeSegments(complete, { operators: false })); }
+            finally { releaseSocketSegments(mesh.controlSockets[0], complete); }
+        }
     } }];
     const payload = { method: 'example.event', uuid: 'existing-uuid' };
     mesh.send(payload);

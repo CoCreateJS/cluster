@@ -29,7 +29,8 @@ let fallbackHttpsServer = null;
 let stateConfig = {
     shutdownTimeoutMs: 15000,
     shutdownHandlersTimeoutMs: 10000,
-    meshCloseDelayMs: 1500
+    meshCloseDelayMs: 1500,
+    enabled: true
 };
 
 /** Give process-owned services a bounded cleanup window before this process exits. */
@@ -94,19 +95,69 @@ export async function loadStateConfig() {
             type: 'state',
             organization_id: server.organization_id,
             server: server.host,
-            cluster: server.cluster_id
-        });
+            cluster: server.cluster_id,
+            worker: server.workerId
+        }, server.crud);
     }
 
-    if (sysConfig) {
-        dotNotationToObject(stateConfig, sysConfig);
-    }
-
-    if (dbConfig) {
-        dotNotationToObject(stateConfig, dbConfig);
-    }
+    const resolved = {
+        shutdownTimeoutMs: 15000,
+        shutdownHandlersTimeoutMs: 10000,
+        meshCloseDelayMs: 1500,
+        enabled: true
+    };
+    if (sysConfig) dotNotationToObject(sysConfig, resolved);
+    if (dbConfig) dotNotationToObject(dbConfig, resolved);
+    for (const key of Object.keys(stateConfig)) delete stateConfig[key];
+    Object.assign(stateConfig, resolved);
 
     return stateConfig;
+}
+
+function telemetryMetric(data, metric) {
+    if (metric === 'memory') return { min: data?.memory?.min, max: data?.memory?.max };
+    if (metric === 'cpu') return { min: data?.cpu?.min, max: data?.cpu?.max };
+    return { min: undefined, max: undefined };
+}
+
+function configuredPolicies(policies) {
+    return Object.entries(policies || {}).map(([metric, rule]) => ({
+        metric,
+        on: Number(rule?.on),
+        off: Number(rule?.off)
+    })).filter(rule => Number.isFinite(rule.on) && Number.isFinite(rule.off) &&
+        rule.on >= 0 && rule.on <= 100 && rule.off >= 0 && rule.off < rule.on);
+}
+
+async function applyTelemetryState(data = {}) {
+    if (stateConfig.enabled === false || stateConfig.enabled === 'false' ||
+        !server?.state || server.state.isShuttingDown) return;
+
+    const cordonPolicies = configuredPolicies(stateConfig.cordon);
+    if (cordonPolicies.length) {
+        const cordonOn = cordonPolicies.some(rule => {
+            const value = telemetryMetric(data, rule.metric).max;
+            return Number.isFinite(value) && value >= rule.on;
+        });
+        const cordonOff = cordonPolicies.every(rule => {
+            const value = telemetryMetric(data, rule.metric).min;
+            return Number.isFinite(value) && value <= rule.off;
+        });
+        if (!server.state.isCordon && cordonOn) await cordon(true, true);
+        else if (server.state.isCordon && cordonOff) await cordon(false, true);
+    }
+
+    const proxyPolicies = configuredPolicies(stateConfig.proxy);
+    const proxyOn = proxyPolicies.some(rule => {
+        const value = telemetryMetric(data, rule.metric).max;
+        return Number.isFinite(value) && value >= rule.on;
+    });
+    const proxyOff = proxyPolicies.length > 0 && proxyPolicies.every(rule => {
+        const value = telemetryMetric(data, rule.metric).min;
+        return Number.isFinite(value) && value <= rule.off;
+    });
+    if (!server.state.isProxying && proxyOn) await proxy(true, true);
+    else if (server.state.isProxying && proxyOff) await proxy(false, true);
 }
 
 /**
@@ -421,6 +472,18 @@ export async function drain(value = true, internalCall = false) {
     console.log(`[@cocreate/cluster] ${processLabel} isDraining updated to: ${server?.state?.isDraining}`);
 }
 
+/** Proxies newly accepted TCP connections to peers while preserving active streams. */
+export async function proxy(value = true, internalCall = false) {
+    const isProxying = typeof value === 'boolean'
+        ? value
+        : Boolean(value && value.value !== undefined ? value.value : true);
+    if (!server?.state || server.state.isProxying === isProxying) return;
+    server.state.isProxying = isProxying;
+    if (!internalCall && server.send) {
+        await server.send({ method: 'proxy', value: isProxying, broadcast: true });
+    }
+}
+
 /**
  * Triggers a process restart across master or worker processes.
  * 
@@ -694,6 +757,14 @@ export async function init(serverInstance) {
     server.on('cordon', payload => cordon(payload));
     server.on('shed', payload => shed(payload));
     server.on('drain', payload => drain(payload));
+    server.on('proxy', payload => proxy(payload, true));
+    if (!server.isPrimary) {
+        server.on('telemetry', payload => {
+            applyTelemetryState(payload?.data || payload).catch(error => {
+                console.error('[@cocreate/cluster] Failed to apply telemetry state policy:', error.message);
+            });
+        });
+    }
     server.on('restart', payload => restart(payload, true));
     server.on('worker.listening', handleWorkerListening);
     if (server.isPrimary) {
@@ -710,12 +781,14 @@ export async function init(serverInstance) {
         isShedding: false,
         isDraining: false,
         isShuttingDown: false,
+        isProxying: false,
         sheddingOrgs: new Set(),
         getServerObject,
         save,
         cordon,
         shed,
         drain,
+        proxy,
         restart,
         reboot,
         shutdown,

@@ -345,6 +345,18 @@ server.emit("cordon", {
 await server.state.cordon(false);
 ```
 
+Worker-local State policies are loaded from the `state` system configuration and matching `configs` records with `type: "state"`. State listens to locally emitted telemetry aggregates and uses each metric's `max` to enter a threshold and `min` to clear it at `off`:
+
+```js
+{
+    enabled: true,
+    proxy: { memory: { on: 75, off: 60 } },
+    cordon: { memory: { on: 90, off: 85 } }
+}
+```
+
+Proxy and cordon thresholds are State policy. Telemetry only flushes on the configured metric checkpoints and emits the aggregate; the `flush` settings live in the telemetry configuration.
+
 ---
 
 ### `server.state.shed(organizations)`

@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync, execSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import { clearSocketSegments } from '@cocreate/socket/transport';
 
 function closePort(port) {
     if (process.platform === 'win32') {
@@ -189,12 +190,12 @@ export class ServerMeshInbound {
             }
             ws.on('pong', () => { ws.isAlive = true; });
 
-            ws.on('message', (rawData) => {
-                this.mesh.handleIncomingMessage(rawData, ws);
+            ws.on('message', (rawData, isBinary) => {
+                this.mesh.handleIncomingMessage(rawData, ws, isBinary);
             });
 
             ws.on('close', code => {
-                ws.segmentReceiver?.clear();
+                clearSocketSegments(ws);
                 if (this.mesh.activeConnections.get(connectionKey) !== ws) return;
                 this.mesh.peerDisconnected(ws);
                 console.log(`[@cocreate/server-mesh/inbound] Inbound peer connection ${identifier} dropped.`);

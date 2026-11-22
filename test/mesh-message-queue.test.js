@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
-import { SegmentReceiver } from '@cocreate/utils/segments';
-import { decode } from '@cocreate/coson';
+import { decodeSegments } from '@cocreate/coson';
+import { receiveSocketSegment, releaseSocketSegments } from '@cocreate/socket/transport';
 import { ServerMesh } from '../src/send/socket/index.js';
 import { ServerMeshOutbound } from '../src/send/socket/outbound.js';
 
@@ -28,12 +28,11 @@ function setup(t) {
     const sockets = [];
     class Socket extends EventEmitter {
         constructor() { super(); this.readyState = 0; this.sent = []; sockets.push(this); }
-        send(bytes) {
-            const complete = this.segmentReceiver ||= new SegmentReceiver();
-            const frame = complete.push(bytes);
-            if (frame) {
-                try { this.sent.push(decode(frame, { operators: false })); }
-                finally { complete.release(frame); }
+        send(data) {
+            const complete = receiveSocketSegment(this, data, typeof data !== 'string');
+            if (complete) {
+                try { this.sent.push(decodeSegments(complete, { operators: false })); }
+                finally { releaseSocketSegments(this, complete); }
             }
         }
         open() { this.readyState = 1; this.emit('open'); }

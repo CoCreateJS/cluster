@@ -3,7 +3,7 @@ import Https from 'node:https';
 import { uuid } from '@cocreate/utils';
 
 /**
- * Initializes the HTTP and HTTPS listeners on the server context.
+ * Creates the HTTP and HTTPS application servers on the server context.
  * @param {object} server - CoCreate server instance.
  * @returns {Promise<void>}
  * @public
@@ -30,16 +30,6 @@ async function init(server) {
     });
 
     server.socket?.attach();
-
-    const reportListening = state => {
-        if (process.connected && server.send) {
-            Promise.resolve(server.send({ method: 'worker.listening', state }))
-                .catch(error => console.error('[@cocreate/cluster] Failed to report worker listener state:', error.message));
-        }
-    };
-
-    server.http.on('listening', () => reportListening(true));
-    server.http.on('close', () => reportListening(false));
 }
 
 /**

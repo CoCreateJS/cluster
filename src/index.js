@@ -27,7 +27,8 @@ import getDeployment from './getDeployment.js';
 import Manager from './manager.js';
 import Fetch from './fetch.js';
 import http from './http.js';
-import State from './state.js';
+import TCP from './tcp.js';
+import State, { loadStateConfig } from './state.js';
 import Log from '@cocreate/log';
 import ApiKey from './apikey.js';
 import OAuth from './oauth.js';
@@ -81,8 +82,7 @@ export class CoCreateServer {
 
     #closeEdgeListeners() {
         if (this.isPrimary) return;
-        if (this.http && this.http.listening) this.http.close();
-        if (this.https && this.https.listening) this.https.close();
+        this.tcp?.close();
     }
 
     closeEdgeListeners() {
@@ -92,12 +92,9 @@ export class CoCreateServer {
     #restoreEdgeListeners() {
         const isCordoned = this.state?.isCordon || this.state?.isCordoned;
         if (this.isPrimary || this.state?.isDraining || isCordoned || this.state?.isShuttingDown) return;
-        const HTTP_PORT = process.env.HTTP_PORT || 80;
-        const HTTPS_PORT = process.env.HTTPS_PORT || 443;
-        const BIND_IP = process.env.BIND_IP || '0.0.0.0';
-
-        if (this.http && !this.http.listening) this.http.listen(HTTP_PORT, BIND_IP);
-        if (this.https && !this.https.listening) this.https.listen(HTTPS_PORT, BIND_IP);
+        this.tcp?.listen().catch(error => {
+            console.error('[@cocreate/cluster] Failed to restore TCP listeners:', error.message);
+        });
     }
 
     restoreEdgeListeners() {
@@ -190,6 +187,7 @@ export class CoCreateServer {
 
         if (this.isWorker) {
             this.workerId = this.workers.workerId;
+            await loadStateConfig();
 
             if (!this.isPrimary) {
                 console.log(`[@cocreate/cluster] [WORKER ${this.workerId}] running with PID: ${process.pid} (Server ID: ${this.id})`);
@@ -214,6 +212,7 @@ export class CoCreateServer {
 
             this.oauth = await OAuth.init(this);
             await http.init(this);
+            if (!this.isPrimary) await TCP.init(this);
 
             // Publish worker active running state object to DB upon creation/startup
             await this.state.save('running');

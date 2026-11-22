@@ -14,6 +14,7 @@
  ********************************************************************************/
 
 import { WebSocket } from 'ws';
+import { clearSocketSegments } from '@cocreate/socket/transport';
 
 /**
  * ServerMeshOutbound manages outbound peer discovery, connection establishment,
@@ -192,7 +193,7 @@ export class ServerMeshOutbound {
             });
 
             clientSocket.on('close', (code) => {
-                clientSocket.segmentReceiver?.clear();
+                clearSocketSegments(clientSocket);
                 if (this.mesh.activeConnections.get(connectionKey) !== clientSocket) return;
                 this.mesh.peerDisconnected(clientSocket);
                 if (this.mesh.isClosed || clientSocket.intentionalClose || code === 1000 ||
@@ -213,9 +214,9 @@ export class ServerMeshOutbound {
                 this.retryTimers.set(connectionKey, setTimeout(connectToPeer, delay));
             });
 
-            clientSocket.on('message', (rawData) => {
+            clientSocket.on('message', (rawData, isBinary) => {
                 if (this.mesh && typeof this.mesh.handleIncomingMessage === 'function') {
-                    this.mesh.handleIncomingMessage(rawData, clientSocket);
+                    this.mesh.handleIncomingMessage(rawData, clientSocket, isBinary);
                 }
             });
 

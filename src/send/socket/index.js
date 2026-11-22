@@ -15,34 +15,10 @@
 
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
-import config from '@cocreate/config';
-import { SegmentReceiver, createFrames, toUint8Array } from '@cocreate/utils/segments';
-import { encode, decode } from '@cocreate/coson';
+import { encodeSegments, decode, decodeSegments } from '@cocreate/coson';
+import { sendSocketSegments, receiveSocketSegment, releaseSocketSegments } from '@cocreate/socket/transport';
 import { ServerMeshInbound } from './inbound.js';
 import { ServerMeshOutbound } from './outbound.js';
-
-function meshFrameSize() {
-    const kib = Number(config.get('socket.chunkSize') ?? 64);
-    if (!Number.isInteger(kib) || kib < 16 || kib > 1024) {
-        throw new RangeError('socket.chunkSize must be an integer from 16 to 1024 KiB');
-    }
-    return kib * 1024;
-}
-
-async function sendFrame(socket, frame) {
-    const chunkSize = meshFrameSize();
-    const bufferedLimit = Math.max(chunkSize * 2, 128 * 1024);
-    for (const chunk of createFrames(frame, chunkSize)) {
-        while ((socket.bufferedAmount || 0) > bufferedLimit)
-            await new Promise(resolve => setTimeout(resolve, 10));
-        await new Promise((resolve, reject) => {
-            try {
-                if (socket.send.length >= 2) socket.send(chunk, error => error ? reject(error) : resolve());
-                else { socket.send(chunk); resolve(); }
-            } catch (error) { reject(error); }
-        });
-    }
-}
 
 /**
  * ServerMesh orchestrates multi-tenant routing, unified IPC event forwarding,
@@ -311,17 +287,20 @@ export class ServerMesh extends EventEmitter {
  * @private
  * @environment server
  */
-    handleIncomingMessage(rawData, ws) {
+    handleIncomingMessage(rawData, ws, isBinary = typeof rawData !== 'string') {
         let message;
+        let complete;
         try {
-            const receiver = ws.segmentReceiver ||= new SegmentReceiver();
-            const complete = receiver.push(rawData);
+            complete = receiveSocketSegment(ws, rawData, isBinary);
             if (!complete) return;
-            try { message = decode(toUint8Array(complete), { operators: false }); }
-            finally { receiver.release(complete); }
+            message = complete.legacy
+                ? decode(complete.legacy, { operators: false })
+                : decodeSegments(complete, { operators: false });
         } catch (err) {
-            console.error('[@cocreate/server-mesh] Invalid binary peer message:', err.message);
+            console.error('[@cocreate/server-mesh] Invalid peer message:', err.message);
             return;
+        } finally {
+            if (complete) releaseSocketSegments(ws, complete);
         }
 
         if (!message || typeof message !== 'object') return;
@@ -449,7 +428,7 @@ export class ServerMesh extends EventEmitter {
         const targetSockets = Array.isArray(sockets) ? sockets : [sockets];
 
         if (this.isClosed) return;
-        const frame = encode(data, { operators: false });
+        const frame = encodeSegments(data, { operators: false });
         const peers = new Set();
         for (const socket of targetSockets) {
             if (!socket) continue;
@@ -460,7 +439,7 @@ export class ServerMesh extends EventEmitter {
             if (key === undefined) {
                 try {
                     if (socket.readyState === 1) {
-                        void sendFrame(socket, frame).catch(err => {
+                        void sendSocketSegments(socket, frame).catch(err => {
                             console.error('[@cocreate/server-mesh] Anonymous socket send failed:', err.message);
                         });
                     }
@@ -489,7 +468,7 @@ export class ServerMesh extends EventEmitter {
         socket.meshSending = true;
         try {
             while (queue.length && socket.readyState === 1) {
-                await sendFrame(socket, queue[0].frame);
+                await sendSocketSegments(socket, queue[0].frame);
                 queue.shift();
             }
         } catch (err) {
