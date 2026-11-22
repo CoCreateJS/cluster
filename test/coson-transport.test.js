@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import cluster from 'node:cluster';
 import { EventEmitter } from 'node:events';
-import { BinaryReceiver } from '@cocreate/socket/binary';
+import { SegmentReceiver } from '@cocreate/utils/segments';
 import { encode, decode } from '@cocreate/coson';
 import IPC from '../src/send/ipc.js';
 import { ServerMesh } from '../src/send/socket/index.js';
@@ -47,7 +47,7 @@ test('Socket to IPC and IPC to Socket preserve CoSON operators and binary bytes'
     const mesh = new ServerMesh();
     mesh.server = server;
     server.cluster = mesh;
-    const receiver = new BinaryReceiver();
+    const receiver = new SegmentReceiver();
     const peerFrames = [];
     const peer = {
         serverId: 'peer-node', organization_id: 'tenant-a', readyState: 1,
@@ -63,26 +63,28 @@ test('Socket to IPC and IPC to Socket preserve CoSON operators and binary bytes'
     const socketMessage = {
         method: 'object.update', organization_id: 'tenant-a',
         serverId: 'remote-origin', workerId: 8, uuid: 'socket-to-ipc',
-        value: { created: { $date: 1700000000123 }, label: '東京 🗼', data: '$binary[0]' },
-        $binary: [{ $Uint8Array: new Uint8Array(96 * 1024).fill(13) }]
+        object: {
+            created: { $date: 1700000000123 }, label: '東京 🗼', data: 'binary[0]',
+            binary: [{ $Uint8Array: new Uint8Array(96 * 1024).fill(13) }]
+        }
     };
     mesh.handleIncomingMessage(frame(socketMessage), { serverId: 'remote-origin' });
     for (let i = 0; i < 20 && !receivedByWorker.length; i++) await new Promise(resolve => setImmediate(resolve));
-    assert.equal(receivedByWorker[0]?.value.created.$date, 1700000000123);
-    assert.equal(receivedByWorker[0]?.value.label, '東京 🗼');
-    assert.equal(receivedByWorker[0]?.value.data, '$binary[0]');
-    assert.deepEqual([...receivedByWorker[0].$binary[0].$Uint8Array], new Array(96 * 1024).fill(13));
+    assert.equal(receivedByWorker[0]?.object.created.$date, 1700000000123);
+    assert.equal(receivedByWorker[0]?.object.label, '東京 🗼');
+    assert.equal(receivedByWorker[0]?.object.data, 'binary[0]');
+    assert.deepEqual([...receivedByWorker[0].object.binary[0].$Uint8Array], new Array(96 * 1024).fill(13));
 
     const ipcMessage = {
         method: 'cache.refresh', server: 'peer-node', organization_id: 'tenant-a',
         serverId: 'local-node', workerId: 1, uuid: 'ipc-to-socket',
-        created: { $date: 1700000000456 }, label: '日本語 🌱', data: '$binary[0]',
-        $binary: [{ $Uint8Array: new Uint8Array([2, 7, 1, 8]) }]
+        created: { $date: 1700000000456 }, label: '日本語 🌱', data: 'binary[0]',
+        binary: [{ $Uint8Array: new Uint8Array([2, 7, 1, 8]) }]
     };
     await server.send(ipcMessage);
     for (let i = 0; i < 20 && !peerFrames.length; i++) await new Promise(resolve => setImmediate(resolve));
     assert.equal(peerFrames[0]?.created.$date, 1700000000456);
     assert.equal(peerFrames[0]?.label, '日本語 🌱');
-    assert.equal(peerFrames[0]?.data, '$binary[0]');
-    assert.deepEqual([...peerFrames[0].$binary[0].$Uint8Array], [2, 7, 1, 8]);
+    assert.equal(peerFrames[0]?.data, 'binary[0]');
+    assert.deepEqual([...peerFrames[0].binary[0].$Uint8Array], [2, 7, 1, 8]);
 });

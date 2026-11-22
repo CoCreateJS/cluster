@@ -15,20 +15,22 @@
 
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
-import { BinaryReceiver, createFrames, getChunkSize } from '@cocreate/socket/binary';
+import config from '@cocreate/config';
+import { SegmentReceiver, createFrames, toUint8Array } from '@cocreate/utils/segments';
 import { encode, decode } from '@cocreate/coson';
 import { ServerMeshInbound } from './inbound.js';
 import { ServerMeshOutbound } from './outbound.js';
 
-function asUint8Array(value) {
-    if (value instanceof Uint8Array) return value;
-    if (value instanceof ArrayBuffer) return new Uint8Array(value);
-    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-    throw new TypeError('Socket message must be a binary CoSON frame.');
+function meshFrameSize() {
+    const kib = Number(config.get('socket.chunkSize') ?? 64);
+    if (!Number.isInteger(kib) || kib < 16 || kib > 1024) {
+        throw new RangeError('socket.chunkSize must be an integer from 16 to 1024 KiB');
+    }
+    return kib * 1024;
 }
 
 async function sendFrame(socket, frame) {
-    const chunkSize = getChunkSize();
+    const chunkSize = meshFrameSize();
     const bufferedLimit = Math.max(chunkSize * 2, 128 * 1024);
     for (const chunk of createFrames(frame, chunkSize)) {
         while ((socket.bufferedAmount || 0) > bufferedLimit)
@@ -61,7 +63,7 @@ export class ServerMesh extends EventEmitter {
         this.activeConnections = new Map(); // organization_id/serverId -> Network Socket
         this.controlSockets = [];
         this.pendingPeerFailures = new Map(); // retained until the workflow confirms persistence
-        this.messageQueues = new Map(); // transport scope/server ID -> serialized FIFO
+        this.messageQueues = new Map(); // transport scope/server ID -> encoded FIFO
         this.organizations = new Map();     // organization_id -> Network Socket[]
 
         this.isClosed = false;
@@ -312,10 +314,10 @@ export class ServerMesh extends EventEmitter {
     handleIncomingMessage(rawData, ws) {
         let message;
         try {
-            const receiver = ws.binaryReceiver ||= new BinaryReceiver();
+            const receiver = ws.segmentReceiver ||= new SegmentReceiver();
             const complete = receiver.push(rawData);
             if (!complete) return;
-            try { message = decode(asUint8Array(complete), { operators: false }); }
+            try { message = decode(toUint8Array(complete), { operators: false }); }
             finally { receiver.release(complete); }
         } catch (err) {
             console.error('[@cocreate/server-mesh] Invalid binary peer message:', err.message);
@@ -436,7 +438,7 @@ export class ServerMesh extends EventEmitter {
     }
 
     /**
-     * Safely serializes and sends payload data across network sockets without direct library coupling.
+     * Encodes and sends payload data across network sockets.
      *
      * @param {Object|Object[]} sockets - Target socket reference(s)
      * @param {Object} data

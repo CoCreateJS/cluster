@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { once } from 'node:events';
 import { WebSocket } from 'ws';
-import { BinaryReceiver } from '@cocreate/socket/binary';
+import { SegmentReceiver } from '@cocreate/utils/segments';
 import { decode } from '@cocreate/coson';
 import { ServerMesh } from '../src/send/socket/index.js';
 
@@ -22,7 +22,7 @@ async function setup(t) {
         const client = new WebSocket(`wss://127.0.0.1:${port}${path}`, [encodeURIComponent(JSON.stringify({ id: 'peer' }))], { rejectUnauthorized: false });
         client.on('error', () => {});
         if (onMessage) {
-            const receiver = new BinaryReceiver();
+            const receiver = new SegmentReceiver();
             client.on('message', data => {
                 const complete = receiver.push(data);
                 if (!complete) return;

@@ -89,8 +89,8 @@ test('real workers reply consistently with async results, errors and ignored ret
 
     const prepared = {
         method: 'example.preserve', master: false, worker: children[0].id,
-        value: { created: { $date: 1700000000123 }, label: '日本語 🌱', image: '$binary[0]' },
-        $binary: [{ $Uint8Array: new Uint8Array([0, 1, 127, 255]) }]
+        value: { created: { $date: 1700000000123 }, label: '日本語 🌱', image: 'binary[0]' },
+        binary: [{ $Uint8Array: new Uint8Array([0, 1, 127, 255]) }]
     };
     const preparedBeforeEncoding = structuredClone(prepared);
     toFrame(prepared);
@@ -98,8 +98,8 @@ test('real workers reply consistently with async results, errors and ignored ret
     const preserved = await server.send(prepared);
     assert.deepEqual(preserved.result.created, { $date: 1700000000123 });
     assert.equal(preserved.result.label, '日本語 🌱');
-    assert.equal(preserved.result.image, '$binary[0]');
-    assert.deepEqual([...preserved.$binary[0].$Uint8Array], [0, 1, 127, 255]);
+    assert.equal(preserved.result.image, 'binary[0]');
+    assert.deepEqual([...preserved.binary[0].$Uint8Array], [0, 1, 127, 255]);
     assert.equal(pending.size, 0);
 
     // Caller discards the send Promise; the transport still clears correlation.

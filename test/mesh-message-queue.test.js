@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
-import { BinaryReceiver } from '@cocreate/socket/binary';
+import { SegmentReceiver } from '@cocreate/utils/segments';
 import { decode } from '@cocreate/coson';
 import { ServerMesh } from '../src/send/socket/index.js';
 import { ServerMeshOutbound } from '../src/send/socket/outbound.js';
@@ -29,7 +29,7 @@ function setup(t) {
     class Socket extends EventEmitter {
         constructor() { super(); this.readyState = 0; this.sent = []; sockets.push(this); }
         send(bytes) {
-            const complete = this.binaryReceiver ||= new BinaryReceiver();
+            const complete = this.segmentReceiver ||= new SegmentReceiver();
             const frame = complete.push(bytes);
             if (frame) {
                 try { this.sent.push(decode(frame, { operators: false })); }
@@ -53,11 +53,12 @@ function setup(t) {
     return { mesh, sockets, send };
 }
 
-test('connecting and disconnected messages replay in FIFO order on the replacement server ID', t => {
+test('connecting and disconnected messages replay in FIFO order on the replacement server ID', async t => {
     const { mesh, sockets, send } = setup(t);
     send(1);
     send(2);
     sockets[0].open();
+    for (let i = 0; i < 20 && sockets[0].sent.length < 2; i++) await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(sockets[0].sent.map(item => item.value), [1, 2]);
     assert.equal(mesh.messageQueues.size, 0);
     sockets[0].close(1006);
@@ -68,28 +69,32 @@ test('connecting and disconnected messages replay in FIFO order on the replaceme
     assert.equal(sockets[1].serverId, 'peer');
     sockets[1].open();
     send(6);
+    for (let i = 0; i < 20 && sockets[1].sent.length < 4; i++) await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(sockets[1].sent.map(item => item.value), [3, 4, 5, 6]);
     assert.equal(mesh.messageQueues.size, 0);
 });
 
-test('prepared operators remain intact while queued and sent', t => {
+test('prepared operators remain intact while queued and sent', async t => {
     const { mesh, sockets } = setup(t);
     const message = { method: 'db.partition.update', server: 'peer', uuid: 'prepared',
         created: { $date: 1700000000000 },
-        image: '$binary[0]', thumbnail: '$binary[1]', label: '日本語 🌱',
-        $binary: [
-            { $Uint8Array: new Uint8Array(96 * 1024).fill(7) },
-            { $Uint16Array: new Uint16Array([11, 22, 33]) }
+        image: 'binary[0]', thumbnail: 'binary[1]', label: '日本語 🌱',
+        binary: [
+            { $Uint8Array: new Uint8Array(96).fill(7) },
+            { $Uint16Array: new Uint8Array(new Uint16Array([11, 22, 33]).buffer) }
         ] };
-    const originalImage = [...message.$binary[0].$Uint8Array];
+    const originalImage = [...message.binary[0].$Uint8Array];
     mesh.send(message);
     message.label = 'mutated after send';
     sockets[0].open();
+    for (let i = 0; i < 20 && !sockets[0].sent.length; i++)
+        await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(sockets[0].sent[0].created, { $date: 1700000000000 });
-    assert.deepEqual([...sockets[0].sent[0].$binary[0].$Uint8Array], originalImage);
-    assert.deepEqual([...sockets[0].sent[0].$binary[1].$Uint16Array], [11, 22, 33]);
-    assert.equal(sockets[0].sent[0].image, '$binary[0]');
-    assert.equal(sockets[0].sent[0].thumbnail, '$binary[1]');
+    assert.deepEqual([...sockets[0].sent[0].binary[0].$Uint8Array], originalImage);
+    const words = sockets[0].sent[0].binary[1].$Uint16Array;
+    assert.deepEqual([...new Uint16Array(words.buffer, words.byteOffset, words.byteLength / 2)], [11, 22, 33]);
+    assert.equal(sockets[0].sent[0].image, 'binary[0]');
+    assert.equal(sockets[0].sent[0].thumbnail, 'binary[1]');
     assert.equal(sockets[0].sent[0].label, '日本語 🌱');
 });
 
@@ -116,7 +121,7 @@ test('retry exhaustion releases queued messages and routing references', t => {
     assert.equal(mesh.outboundManager.retryTimers.size, 0);
 });
 
-test('same server control and tenant queues remain isolated; tenant closure clears only its queue', t => {
+test('same server control and tenant queues remain isolated; tenant closure clears only its queue', async t => {
     const { mesh, sockets, send } = setup(t);
     mesh.organizations.set('tenant', []);
     mesh.outboundManager.connectPeer({ _id: 'peer', ip: '192.0.2.1' }, 1, 'tenant');
@@ -126,23 +131,27 @@ test('same server control and tenant queues remain isolated; tenant closure clea
     mesh.closeOrganization('tenant');
     assert.equal(mesh.messageQueues.size, 1);
     sockets[0].open();
+    for (let i = 0; i < 20 && !sockets[0].sent.length; i++) await new Promise(resolve => setImmediate(resolve));
+    for (let i = 0; i < 20 && mesh.messageQueues.size; i++) await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(sockets[0].sent.map(item => item.value), ['control']);
     assert.equal(mesh.messageQueues.size, 0);
 });
 
-test('a synchronous send failure retains the unsent message ahead of subsequent messages', t => {
+test('a synchronous send failure retains the unsent message ahead of subsequent messages', async t => {
     const { mesh, sockets, send } = setup(t);
     sockets[0].open();
     const transmit = sockets[0].send;
     sockets[0].send = () => { throw new Error('transport failed'); };
     send(1);
+    await new Promise(resolve => setImmediate(resolve));
     sockets[0].send = transmit;
     send(2);
+    for (let i = 0; i < 20 && sockets[0].sent.length < 2; i++) await new Promise(resolve => setImmediate(resolve));
     assert.deepEqual(sockets[0].sent.map(item => item.value), [1, 2]);
     assert.equal(mesh.messageQueues.size, 0);
 });
 
-test('broadcast recipients each retain one independent queue and preserve the encoded envelope', t => {
+test('broadcast recipients each retain one independent queue and preserve the encoded envelope', async t => {
     const { mesh, sockets } = setup(t);
     mesh.outboundManager.connectPeer({ _id: 'other', ip: '192.0.2.2' });
     const message = { method: 'example', value: 1 };
@@ -151,6 +160,9 @@ test('broadcast recipients each retain one independent queue and preserve the en
     assert.equal(mesh.messageQueues.size, 2);
     sockets[0].open();
     sockets[1].open();
+    for (let i = 0; i < 20 && (sockets[0].sent.length === 0 || sockets[1].sent.length === 0); i++)
+        await new Promise(resolve => setImmediate(resolve));
+    for (let i = 0; i < 20 && mesh.messageQueues.size; i++) await new Promise(resolve => setImmediate(resolve));
     assert.equal(sockets[0].sent[0].value, 1);
     assert.deepEqual(sockets[0].sent, sockets[1].sent);
     assert.equal(mesh.messageQueues.size, 0);

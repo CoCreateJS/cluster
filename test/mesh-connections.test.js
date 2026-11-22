@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter, once } from 'node:events';
 import { WebSocket, WebSocketServer } from 'ws';
-import { BinaryReceiver } from '@cocreate/socket/binary';
+import { SegmentReceiver } from '@cocreate/utils/segments';
 import { decode } from '@cocreate/coson';
 import { ServerMesh } from '../src/send/socket/index.js';
 import { ServerMeshOutbound } from '../src/send/socket/outbound.js';
@@ -172,7 +172,7 @@ test('direct Mesh send preserves the envelope without adding local origin IDs', 
     const mesh = new ServerMesh();
     mesh.server = { id: 'relay-node', workerId: 2, cluster_id: 'relay-cluster', isPrimary: true };
     const sent = [];
-    const receiver = new BinaryReceiver();
+    const receiver = new SegmentReceiver();
     mesh.controlSockets = [{ readyState: 1, send: data => {
         const complete = receiver.push(data);
         if (!complete) return;

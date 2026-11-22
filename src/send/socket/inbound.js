@@ -194,7 +194,7 @@ export class ServerMeshInbound {
             });
 
             ws.on('close', code => {
-                ws.binaryReceiver?.clear();
+                ws.segmentReceiver?.clear();
                 if (this.mesh.activeConnections.get(connectionKey) !== ws) return;
                 this.mesh.peerDisconnected(ws);
                 console.log(`[@cocreate/server-mesh/inbound] Inbound peer connection ${identifier} dropped.`);

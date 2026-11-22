@@ -232,8 +232,8 @@ test('worker-to-worker IPC forwarding preserves prepared operators and binary at
     const message = {
         method: 'example.relay', server: 'server-1', worker: 2, master: false,
         serverId: 'server-1', workerId: 1, uuid: 'worker-relay',
-        value: { date: { $date: 1700000000000 }, text: '東京 🗼', binary: '$binary[0]' },
-        $binary: [{ $Uint8Array: new Uint8Array([3, 1, 4, 1, 5]) }]
+        value: { date: { $date: 1700000000000 }, text: '東京 🗼', binary: 'binary[0]' },
+        binary: [{ $Uint8Array: new Uint8Array([3, 1, 4, 1, 5]) }]
     };
     emitIPCMessage(source, message);
     await new Promise(resolve => setImmediate(resolve));
@@ -241,8 +241,8 @@ test('worker-to-worker IPC forwarding preserves prepared operators and binary at
     const delivery = received.find(item => item.id === 2)?.payload;
     assert.equal(delivery?.value.date.$date, 1700000000000);
     assert.equal(delivery?.value.text, '東京 🗼');
-    assert.equal(delivery?.value.binary, '$binary[0]');
-    assert.deepEqual([...delivery.$binary[0].$Uint8Array], [3, 1, 4, 1, 5]);
+    assert.equal(delivery?.value.binary, 'binary[0]');
+    assert.deepEqual([...delivery.binary[0].$Uint8Array], [3, 1, 4, 1, 5]);
     assert.equal(source.responses[0]?.uuid, 'worker-relay');
     assert.equal(source.responses[0]?.response, true);
 });
