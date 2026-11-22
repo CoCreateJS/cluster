@@ -22,7 +22,7 @@ async function credentialFixture(root) {
 }
 
 
-test('master reads the tenant API deploy key and configures noninteractive, verified SSH', async t => {
+test('primary reads the tenant API deploy key and configures noninteractive, verified SSH', async t => {
     const localFsRoot = await fs.mkdtemp(path.join(os.tmpdir(), "repository auth's "));
     t.after(() => fs.rm(localFsRoot, { recursive: true, force: true }));
     const credential = await credentialFixture(localFsRoot);

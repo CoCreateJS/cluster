@@ -88,7 +88,7 @@ async function setup(t, options = {}) {
             assert.ok(tenantRecords.has(input.server._id), 'Tenant inventory exists before VM boot');
             if (options.failProvider) return { error: ['provider result unknown'] };
             const tenantRecord = tenantRecords.get(input.server._id);
-            tenantRecord.master.status = 'running'; // Simulate startup racing the provider response.
+            tenantRecord.primary.status = 'running'; // Simulate startup racing the provider response.
             tenantRecord.ip = '203.0.113.10';
             const patch = { _id: input.server._id, status: 'starting', 'deployment.id': 'instance-1' };
             await server.crud.send({ method: 'object.update', array: 'servers', organization_id: platform, host: server.host, object: patch });
@@ -100,8 +100,8 @@ async function setup(t, options = {}) {
         calls.push(clone(request));
         assert.equal(request.organization_id, platform);
         assert.equal(request.host, 'platform.test');
-        assert.equal(inventory.get(request.data.server_id).master.status, 'terminating');
-        assert.equal(tenantRecords.get(request.data.server_id).master.status, 'terminating');
+        assert.equal(inventory.get(request.data.server_id).primary.status, 'terminating');
+        assert.equal(tenantRecords.get(request.data.server_id).primary.status, 'terminating');
         if (options.failTermination) return { success: false, error: ['provider rejected termination'] };
         return { data: { state: 'shutting-down' } };
     } };
@@ -183,7 +183,7 @@ test('managed provider creation failure retains failed records in both inventori
     const { handler, inventory, tenantRecords } = await setup(t, { failProvider: true });
     const input = scalingRequest('create-instance');
     assert.equal((await managedRequest(handler, input)).status, 500);
-    for (const records of [inventory, tenantRecords]) assert.equal(records.get(input.data.server_id).master.status, 'failed');
+    for (const records of [inventory, tenantRecords]) assert.equal(records.get(input.data.server_id).primary.status, 'failed');
 });
 
 for (const failTermination of [false, true]) {
@@ -198,7 +198,7 @@ for (const failTermination of [false, true]) {
         assert.equal(calls[0].data.cluster_id, clusterId);
         assert.equal(calls[0].data.id, 'instance-1');
         for (const records of [inventory, tenantRecords]) {
-            assert.equal(records.get(input.data.server_id).master.status, failTermination ? 'failed' : 'terminating');
+            assert.equal(records.get(input.data.server_id).primary.status, failTermination ? 'failed' : 'terminating');
         }
         assert.equal(typeof handler.terminateServer, 'function');
         assert.equal(Object.keys(handler).includes('terminateServer'), false);
@@ -226,7 +226,7 @@ test('createServer uses the supplied cluster and mirrors tenant bootstrap and pr
     assert.equal(inventory.get(input.server._id).deployment.type, 'suitable');
     assert.equal(inventory.get(input.server._id).deployment.id, 'instance-1');
     assert.equal(tenantRecords.get(input.server._id).deployment.id, 'instance-1');
-    assert.equal(tenantRecords.get(input.server._id).master.status, 'running');
+    assert.equal(tenantRecords.get(input.server._id).primary.status, 'running');
     assert.deepEqual(tenantRecords.get(input.server._id).manager, {
         organization_id: platform, host: 'platform.test', apiKey: 'test-only-management-key'
     });
@@ -240,12 +240,12 @@ test('createServer uses the supplied cluster and mirrors tenant bootstrap and pr
 for (const status of ['running', 'provisioning', 'failed', 'terminating', 'stopped']) {
     test(`createServer executes the command without reconsidering existing ${status} inventory`, async t => {
         const { handler, cluster, calls, inventory } = await setup(t, {
-            existing: { _id: 'ffffffffffffffffffffffff', cluster_id: clusterId, master: { status } }
+            existing: { _id: 'ffffffffffffffffffffffff', cluster_id: clusterId, primary: { status } }
         });
         assert.equal((await handler.createServer(cluster)).status, 'created');
         assert.equal(calls.length, 1);
         assert.equal(inventory.size, 2);
-        assert.equal(inventory.get('ffffffffffffffffffffffff').master.status, status);
+        assert.equal(inventory.get('ffffffffffffffffffffffff').primary.status, status);
     });
 }
 
@@ -347,6 +347,6 @@ test('startCluster reports detached creation failures inside Manager', async t =
     assert.equal(handler.startCluster(tenant), undefined);
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(inventory.size, 1);
-    assert.equal([...inventory.values()][0].master.status, 'failed');
+    assert.equal([...inventory.values()][0].primary.status, 'failed');
     assert(logs.some(args => args[0].includes('Organization cluster startup failed')));
 });

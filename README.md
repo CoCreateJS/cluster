@@ -139,7 +139,7 @@ handler; its `server.manager` connection only sends requests.
 
 State's existing persistence helper mirrors successful state.save envelopes once
 after the local write. Each worker sends its existing worker section; the primary
-sends its existing master/node section. Mirror delivery has a three-second timeout;
+sends its existing primary/node section. Mirror delivery has a three-second timeout;
 failure is logged without failing or repeating local persistence. There is no
 delivery queue or replay, and direct CRUD writes outside this path are not captured.
 Telemetry is not mirrored.
@@ -256,7 +256,7 @@ retain the existing two-second replacement and readiness flow, including custom
 environment variables. Explicit deletion also cancels pending replacement.
 
 Startup configuration is private to the manager. `configureWorkers(value)`
-resolves that configuration and `setupMasterCluster()` creates the initial
+resolves that configuration and `setupPrimaryCluster()` creates the initial
 processes. `0` uses the CPU count; negative values subtract from it (`-1` reserves
 one core, `-2` reserves two), with a minimum of one worker. A resolved count of one
 runs the primary and worker roles in the same process without forking. No runtime `server.totalWorkers` counter is maintained. Live counts
@@ -529,25 +529,25 @@ server.send({
 });
 ```
 
-Primary process and host lifecycle controls target `master: true`:
+Primary process and host lifecycle controls target `primary: true`:
 
 ```javascript
 server.send({
 	method: "restart",
 	server: "server_b_id",
-	master: true
+	primary: true
 });
 
 server.send({
 	method: "reboot",
 	server: "server_b_id",
-	master: true
+	primary: true
 });
 
 server.send({
 	method: "shutdown",
 	server: "server_b_id",
-	master: true
+	primary: true
 });
 ```
 
@@ -855,9 +855,9 @@ invocations do not register this activation-only watchdog.
 
 ### Accepted termination retains lifecycle records
 
-After the drain/capacity sequence, AutoScaler commits master.status terminating before the provider request. Success retains it; a termination error overrides it with failed. It then dispatches State shutdown to the selected server. State.save skips failed/terminating records while shutdown cleanup proceeds. Server inventory is retained briefly rather than deleted in the termination request.
+After the drain/capacity sequence, AutoScaler commits primary.status terminating before the provider request. Success retains it; a termination error overrides it with failed. It then dispatches State shutdown to the selected server. State.save skips failed/terminating records while shutdown cleanup proceeds. Server inventory is retained briefly rather than deleted in the termination request.
 
-AutoScaler stores removal outcomes in master.status. Capacity/drain cancellations before provider dispatch restore running; termination failures remain failed. The separate decommission status object is no longer used; decommissionStrategy remains the policy configuration name.
+AutoScaler stores removal outcomes in primary.status. Capacity/drain cancellations before provider dispatch restore running; termination failures remain failed. The separate decommission status object is no longer used; decommissionStrategy remains the policy configuration name.
 
 After persisting a managed server terminating update, Manager schedules cleanup once after one minute. It resolves the tenant scope from the stored cluster.managedOrganization and calls AutoScaler's shared deleteServer helper to delete the tenant and platform copies, without rechecking server status or calling the cloud provider. Duplicate reports do not postpone cleanup. A successfully persisted failed update cancels the pending timer directly. AutoScaler also sweeps its own cluster every ten minutes, starting ten minutes after initialization; managed sweeps request platform deletion through the authorized Manager object.delete servers operation. Already-missing records are successful deletions. Failed records are not selected. The management permission reference includes server-only deletion; existing issued keys require that grant for tenant-initiated platform cleanup. These process-local timers do not survive restarts.
 

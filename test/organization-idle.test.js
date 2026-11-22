@@ -26,7 +26,7 @@ async function setup(t, { minimum = 0, enabled = true, workers = 1, telemetry = 
             for (const listener of cluster.listeners(event)) if (!listeners.includes(listener)) cluster.removeListener(event, listener);
         }
     });
-    const record = { _id: 'node', cluster_id: 'cluster', master: { status: 'running' },
+    const record = { _id: 'node', cluster_id: 'cluster', primary: { status: 'running' },
         deployment: { cloud: 'cloud', dns: [], id: 'vm', region: 'us-east-1', vCPU: 2, memoryGb: 2 } };
     const calls = [];
     const server = Object.assign(new EventEmitter(), {
@@ -39,8 +39,8 @@ async function setup(t, { minimum = 0, enabled = true, workers = 1, telemetry = 
         },
         crud: { send: async request => {
             if (request.method === 'object.update') {
-                record.master.status = request.object['master.status'];
-                calls.push(['status', record.master.status]);
+                record.primary.status = request.object['primary.status'];
+                calls.push(['status', record.primary.status]);
                 return { object: [structuredClone(record)] };
             }
             if (request.array === 'apis') return { object: [{ _id: 'cloud', name: 'aws', provider: 'aws' }] };
@@ -52,8 +52,8 @@ async function setup(t, { minimum = 0, enabled = true, workers = 1, telemetry = 
                 timestamp: new Date().toISOString(), cpu: { avg: 80 }, memory: { avg_used_pct: 80 } }] : [] };
             const query = request.filter.query;
             if (query._id) return { object: [structuredClone(record)] };
-            const status = query['master.status'];
-            return { object: (Array.isArray(status?.$in) ? status.$in.includes(record.master.status) : status === record.master.status)
+            const status = query['primary.status'];
+            return { object: (Array.isArray(status?.$in) ? status.$in.includes(record.primary.status) : status === record.primary.status)
                 ? [structuredClone(record)] : [] };
         } }
     });

@@ -50,27 +50,27 @@ test('worker shutdown starts services before drain and waits only for bounded cl
 });
 
 for (const status of ['failed', 'terminating']) {
-    test(`worker exits without saving over master ${status}`, async t => {
+    test(`worker exits without saving over primary ${status}`, async t => {
         const { server, order, shutdownWorker } = await setup(t);
         const methods = [];
         server.crud.send = async request => {
             methods.push(request.method);
-            return { object: [{ master: { status } }] };
+            return { object: [{ primary: { status } }] };
         };
-        await shutdownWorker('MASTER_SHUTDOWN');
+        await shutdownWorker('PRIMARY_SHUTDOWN');
         assert.deepEqual(methods, ['object.read']);
         assert.ok(order.includes('drain'));
         assert.equal(order.at(-1), 'exit:0');
     });
 }
 
-test('master message, direct worker signals, and worker restart each invoke local services', async t => {
-    for (const trigger of ['master', 'SIGTERM', 'SIGINT', 'restart']) {
+test('primary message, direct worker signals, and worker restart each invoke local services', async t => {
+    for (const trigger of ['primary', 'SIGTERM', 'SIGINT', 'restart']) {
         await t.test(trigger, async t => {
             const { server, events, order } = await setup(t);
             const reasons = [];
             server.shutdownHandlers.add(reason => reasons.push(reason));
-            if (trigger === 'master') await events.get('shutdown')();
+            if (trigger === 'primary') await events.get('shutdown')();
             else if (trigger === 'restart') await events.get('restart')({});
             else {
                 const listener = process.listeners(trigger).at(-1);

@@ -64,7 +64,7 @@ export function runShutdownHandlers(reason) {
     return pending;
 }
 
-/** Worker signals, application restarts, and master shutdown messages share cleanup. */
+/** Worker signals, application restarts, and primary shutdown messages share cleanup. */
 export function shutdownWorker(reason) {
     if (server.state?.workerShutdownPromise) return server.state.workerShutdownPromise;
     if (server.state) server.state.isShuttingDown = true;
@@ -161,13 +161,13 @@ async function applyTelemetryState(data = {}) {
 }
 
 /**
- * Registers process signal handlers (SIGINT, SIGTERM, SIGBREAK) and master/worker IPC event bindings.
+ * Registers process signal handlers (SIGINT, SIGTERM, SIGBREAK) and primary/worker IPC event bindings.
  */
 function setupSignalHandlers() {
     if (server?.isPrimary) {
         ['SIGINT', 'SIGTERM', 'SIGBREAK'].forEach((signal) => {
             process.on(signal, () => {
-                console.log(`\n[@cocreate/cluster] [MASTER] Received ${signal}. Orchestrating graceful shutdown...`);
+                console.log(`\n[@cocreate/cluster] [PRIMARY] Received ${signal}. Orchestrating graceful shutdown...`);
                 triggerGlobalShutdown(signal);
             });
         });
@@ -180,8 +180,8 @@ function setupSignalHandlers() {
         });
 
         server?.on('shutdown', async () => {
-            console.log(`[@cocreate/cluster] [WORKER ${server?.workerId}] Instructed by master to shutdown. Draining...`);
-            await shutdownWorker('MASTER_SHUTDOWN');
+            console.log(`[@cocreate/cluster] [WORKER ${server?.workerId}] Instructed by primary to shutdown. Draining...`);
+            await shutdownWorker('PRIMARY_SHUTDOWN');
         });
     }
 }
@@ -265,14 +265,14 @@ export async function save(overrideStatus) {
             (Array.isArray(current.error) ? current.error.length : current.error)) {
             throw new Error('Unable to read server status before saving state.');
         }
-        const master = current.object?.[0]?.master;
-        const recoveringMeshFailure = master?.status === 'failed' && master.failure?.source === 'mesh' &&
+        const primary = current.object?.[0]?.primary;
+        const recoveringMeshFailure = primary?.status === 'failed' && primary.failure?.source === 'mesh' &&
             server.isPrimary && !server.state?.isShuttingDown && (!overrideStatus || overrideStatus === 'running');
-        if (master?.status === 'terminating' || (master?.status === 'failed' && !recoveringMeshFailure)) return;
+        if (primary?.status === 'terminating' || (primary?.status === 'failed' && !recoveringMeshFailure)) return;
     }
     if (server?.isPrimary) {
-        const masterStatus = overrideStatus || (server.state?.isShuttingDown ? 'stopped' : 'running');
-        const isPrimaryStopped = masterStatus === 'stopped';
+        const primaryStatus = overrideStatus || (server.state?.isShuttingDown ? 'stopped' : 'running');
+        const isPrimaryStopped = primaryStatus === 'stopped';
 
         const payloadData = {
             ip: server.ip,
@@ -280,12 +280,12 @@ export async function save(overrideStatus) {
             status: (server.state?.status || 'RUNNING').toLowerCase(), // OS level status: 'running', 'rebooting', 'stopped'
             totalWorkers: server.workers.size,
             deployment: server.deployment,
-            master: isPrimaryStopped ? {
+            primary: isPrimaryStopped ? {
                 pid: null,
                 status: 'stopped'
             } : {
                 pid: process.pid,
-                status: masterStatus
+                status: primaryStatus
             }
         };
 
@@ -299,7 +299,7 @@ export async function save(overrideStatus) {
                 isDraining: false
             } : {
                 pid: process.pid,
-                status: masterStatus,
+                status: primaryStatus,
                 isCordoned: server.state?.isCordon || server.state?.isCordoned || false,
                 isShedding: server.state?.isShedding || false,
                 isDraining: server.state?.isDraining || false
@@ -363,14 +363,14 @@ export async function cordon(value = true, internalCall = false) {
             server.send({ method: 'worker_state_change', isCordoned: isCordon });
         }
     } else {
-        evaluateMasterFallback();
+        evaluatePrimaryFallback();
     }
 
     if (server.isPrimary && !internalCall) {
         await save();
     }
     
-    const processLabel = server.isPrimary ? `[MASTER] (${process.pid})` : `[WORKER] ${process.pid} (ID: ${server.workerId})`;
+    const processLabel = server.isPrimary ? `[PRIMARY] (${process.pid})` : `[WORKER] ${process.pid} (ID: ${server.workerId})`;
     console.log(`[@cocreate/cluster] ${processLabel} isCordon updated to: ${server?.state?.isCordon}`);
 }
 
@@ -425,7 +425,7 @@ export async function shed(arg, internalCall = false) {
         await save();
     }
 
-    const processLabel = server.isPrimary ? `Master (${process.pid})` : `Worker ${process.pid} (ID: ${server.workerId})`;
+    const processLabel = server.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${server.workerId})`;
     console.log(`[@cocreate/cluster] ${processLabel} isShedding updated to: ${server?.state?.isShedding}`);
 }
 
@@ -468,7 +468,7 @@ export async function drain(value = true, internalCall = false) {
         await save();
     }
 
-    const processLabel = server.isPrimary ? `Master (${process.pid})` : `Worker ${process.pid} (ID: ${server.workerId})`;
+    const processLabel = server.isPrimary ? `Primary (${process.pid})` : `Worker ${process.pid} (ID: ${server.workerId})`;
     console.log(`[@cocreate/cluster] ${processLabel} isDraining updated to: ${server?.state?.isDraining}`);
 }
 
@@ -485,7 +485,7 @@ export async function proxy(value = true, internalCall = false) {
 }
 
 /**
- * Triggers a process restart across master or worker processes.
+ * Triggers a process restart across primary or worker processes.
  * 
  * @param {Object} [payload={}] - Payload options
  * @param {boolean} [fromEvent=false] - Event trigger flag
@@ -499,12 +499,12 @@ export async function restart(payload = {}, fromEvent = false) {
     }
 
     if (server.isPrimary) {
-        if (payload && (payload.isPrimary || payload.master)) {
-            console.log(`[@cocreate/cluster] [MASTER] App restart commanded. Triggering global graceful shutdown...`);
+        if (payload && (payload.isPrimary || payload.primary)) {
+            console.log(`[@cocreate/cluster] [PRIMARY] App restart commanded. Triggering global graceful shutdown...`);
             triggerGlobalShutdown('API_RESTART');
         }
     } else {
-        if (payload && (payload.isPrimary || payload.master)) return;
+        if (payload && (payload.isPrimary || payload.primary)) return;
 
         console.log(`[@cocreate/cluster] [WORKER ${server.workerId}] Restart triggered. Commencing drain...`);
         await save('restarting');
@@ -513,7 +513,7 @@ export async function restart(payload = {}, fromEvent = false) {
 }
 
 /**
- * Triggers an OS kernel reboot sequence on the master node.
+ * Triggers an OS kernel reboot sequence on the primary node.
  * 
  * @param {Object} [payload={}] - Payload options
  * @param {boolean} [fromEvent=false] - Event trigger flag
@@ -522,14 +522,14 @@ export function reboot(payload = {}, fromEvent = false) {
     if (!fromEvent) {
         const sendPayload = (payload && typeof payload === 'object') ? payload : {};
         sendPayload.method = 'reboot';
-        if (!server.isPrimary) sendPayload.master = true;
+        if (!server.isPrimary) sendPayload.primary = true;
         if (server.send) server.send(sendPayload);
         return;
     }
 
     if (!server.isPrimary) return;
 
-    console.log(`[@cocreate/cluster] [MASTER] OS Reboot requested. Commencing graceful shutdown before kernel reboot...`);
+    console.log(`[@cocreate/cluster] [PRIMARY] OS Reboot requested. Commencing graceful shutdown before kernel reboot...`);
     if (server.state) server.state.status = 'REBOOTING';
     
     if (server.cluster) {
@@ -538,7 +538,7 @@ export function reboot(payload = {}, fromEvent = false) {
     save();
 
     triggerGlobalShutdown('OS_REBOOT', () => {
-        console.log(`[@cocreate/cluster] [MASTER] Executing OS Reboot: sudo reboot`);
+        console.log(`[@cocreate/cluster] [PRIMARY] Executing OS Reboot: sudo reboot`);
         exec('sudo reboot', (err) => {
             if (err) {
                 console.error("[@cocreate/cluster] Failed to execute sudo reboot:", err.message);
@@ -549,7 +549,7 @@ export function reboot(payload = {}, fromEvent = false) {
 }
 
 /**
- * Triggers an OS poweroff sequence on the master node.
+ * Triggers an OS poweroff sequence on the primary node.
  * 
  * @param {Object} [payload={}] - Payload options
  * @param {boolean} [fromEvent=false] - Event trigger flag
@@ -558,18 +558,18 @@ export function shutdown(payload = {}, fromEvent = false) {
     if (!fromEvent) {
         const sendPayload = (payload && typeof payload === 'object') ? payload : {};
         sendPayload.method = 'shutdown';
-        if (!server.isPrimary) sendPayload.master = true;
+        if (!server.isPrimary) sendPayload.primary = true;
         if (server.send) server.send(sendPayload);
         return;
     }
 
     if (!server.isPrimary) return;
 
-    console.log(`[@cocreate/cluster] [MASTER] OS Shutdown requested. Commencing graceful shutdown before VM poweroff...`);
+    console.log(`[@cocreate/cluster] [PRIMARY] OS Shutdown requested. Commencing graceful shutdown before VM poweroff...`);
     if (server.state) server.state.status = 'STOPPED';
 
     triggerGlobalShutdown('OS_SHUTDOWN', () => {
-        console.log(`[@cocreate/cluster] [MASTER] Executing OS Poweroff: sudo poweroff`);
+        console.log(`[@cocreate/cluster] [PRIMARY] Executing OS Poweroff: sudo poweroff`);
         exec('sudo poweroff', (err) => {
             if (err) {
                 console.error("[@cocreate/cluster] Failed to execute sudo poweroff:", err.message);
@@ -589,7 +589,7 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
     if (!server.isPrimary || server.state?.isShuttingDown) return;
     const shutdownDeadline = Date.now() + stateConfig.shutdownTimeoutMs;
 
-    console.log(`\n[@cocreate/cluster] [MASTER] Commencing Global Shutdown Sequence (Reason: ${reason})...`);
+    console.log(`\n[@cocreate/cluster] [PRIMARY] Commencing Global Shutdown Sequence (Reason: ${reason})...`);
     
     if (server.state) {
         server.state.isShuttingDown = true;
@@ -623,7 +623,7 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
                 server.cluster.close(reason);
             }
             if (server.state) server.state.isMeshClosed = true;
-            console.log("[@cocreate/cluster] [MASTER] Mesh closed successfully.");
+            console.log("[@cocreate/cluster] [PRIMARY] Mesh closed successfully.");
         }, stateConfig.meshCloseDelayMs);
     }
 
@@ -652,7 +652,7 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
     // Step 3: Safety timeout
     if (server.state) {
         server.state.primaryShutdownTimeout = setTimeout(async () => {
-            console.error(`[@cocreate/cluster] [MASTER] Shutdown Timeout exceeded (${stateConfig.shutdownTimeoutMs / 1000}s). Forcing process exit.`);
+            console.error(`[@cocreate/cluster] [PRIMARY] Shutdown Timeout exceeded (${stateConfig.shutdownTimeoutMs / 1000}s). Forcing process exit.`);
             await finalizeShutdown();
             if (typeof completionCallback === 'function') completionCallback();
             else process.exit(1);
@@ -665,7 +665,7 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
     }
     
     if (server.workers && server.workers.size === 0) {
-        console.log("[@cocreate/cluster] [MASTER] No active workers detected. Concluding shutdown.");
+        console.log("[@cocreate/cluster] [PRIMARY] No active workers detected. Concluding shutdown.");
         await finalizeShutdown();
         if (typeof completionCallback === 'function') setTimeout(completionCallback, 1000);
         else setTimeout(() => process.exit(0), 1000);
@@ -673,9 +673,9 @@ export async function triggerGlobalShutdown(reason, completionCallback) {
 }
 
 /**
- * Evaluates active worker states and activates/deactivates emergency master fallback HTTP server.
+ * Evaluates active worker states and activates/deactivates emergency primary fallback HTTP server.
  */
-export function evaluateMasterFallback() {
+export function evaluatePrimaryFallback() {
     if (!server?.isPrimary) return;
 
     const workersList = server.workers ? Array.from(server.workers.values()) : [];
@@ -705,7 +705,7 @@ export function evaluateMasterFallback() {
                 fallbackHttpsServer.listen(HTTPS_PORT, BIND_IP);
             }
             
-            console.log(`[@cocreate/cluster] [MASTER] All workers cordoned/down. Master fallback active (500 mode).`);
+            console.log(`[@cocreate/cluster] [PRIMARY] All workers cordoned/down. Primary fallback active (500 mode).`);
         }
     } else {
         if (fallbackHttpServer) {
@@ -715,7 +715,7 @@ export function evaluateMasterFallback() {
                 fallbackHttpsServer.close();
                 fallbackHttpsServer = null;
             }
-            console.log(`[@cocreate/cluster] [MASTER] Workers active. Deactivating Master fallback.`);
+            console.log(`[@cocreate/cluster] [PRIMARY] Workers active. Deactivating Primary fallback.`);
         }
     }
 }
@@ -726,7 +726,7 @@ async function handleWorkerListening(payload) {
     const worker = server.workers?.setListening(payload.workerId, payload.state);
     if (!worker) return;
 
-    evaluateMasterFallback();
+    evaluatePrimaryFallback();
     const workersReady = server.workers.size > 0 &&
         [...server.workers.values()].every(item => item.isListening);
     if (!workersReady) return;
@@ -736,7 +736,7 @@ async function handleWorkerListening(payload) {
         await server.repository?.publish();
     } catch (error) {
         console.error(
-            '[@cocreate/cluster] Failed to publish master readiness or initial repository data:',
+            '[@cocreate/cluster] Failed to publish primary readiness or initial repository data:',
             error.message
         );
     }
@@ -793,7 +793,7 @@ export async function init(serverInstance) {
         reboot,
         shutdown,
         triggerGlobalShutdown,
-        evaluateMasterFallback
+        evaluatePrimaryFallback
     };
 }
 

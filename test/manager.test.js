@@ -54,7 +54,7 @@ async function setupState(t, { primary = true, failedMirror = false } = {}) {
             if (failedMirror) throw new Error('offline');
         } },
         crud: { send: async request => {
-            if (request.method === 'object.read') return { object: [{ _id: 'server-1', master: { status: 'running' } }] };
+            if (request.method === 'object.read') return { object: [{ _id: 'server-1', primary: { status: 'running' } }] };
             order.push('local'); writes.push(structuredClone(request)); return { object: [request.object] };
         } }
     };
@@ -69,7 +69,7 @@ for (const primary of [true, false]) {
         assert.deepEqual(order, ['local', 'mirror']);
         assert.deepEqual(mirrors, writes);
         assert.equal(writes.length, 1);
-        if (primary) assert.equal(writes[0].object.master.status, 'running');
+        if (primary) assert.equal(writes[0].object.primary.status, 'running');
         else assert.deepEqual(Object.keys(writes[0].object), ['_id', 'worker2']);
     });
 }

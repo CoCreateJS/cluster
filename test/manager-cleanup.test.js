@@ -7,14 +7,14 @@ import apiKeySeed from '../../../app/src/apps/api-keys/config/data.json' with { 
 
 const id = 'server-1';
 const update = status => ({
-    method: 'object.update', array: 'servers', object: { _id: id, 'master.status': status }
+    method: 'object.update', array: 'servers', object: { _id: id, 'primary.status': status }
 });
 
 async function setup(t, { authorized = true, failUpdate = false, failDelete = false } = {}) {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const calls = [], logs = [];
     t.mock.method(console, 'error', (...args) => logs.push(args));
-    const record = { _id: id, cluster_id: 'cluster-1', host: 'tenant.test', master: { status: 'running' } };
+    const record = { _id: id, cluster_id: 'cluster-1', host: 'tenant.test', primary: { status: 'running' } };
     const copies = new Map([['platform', structuredClone(record)], ['tenant', structuredClone(record)]]);
     const server = {
         isPrimary: false, organization_id: 'platform', host: 'platform.test',
@@ -37,8 +37,8 @@ async function setup(t, { authorized = true, failUpdate = false, failDelete = fa
                 }
                 if (failUpdate) return { success: false, error: ['Write unavailable'] };
                 const saved = copies.get('platform');
-                const status = request.object['master.status'] || request.object.master?.status;
-                saved.master.status = status;
+                const status = request.object['primary.status'] || request.object.primary?.status;
+                saved.primary.status = status;
                 return { object: [structuredClone(saved)] };
             }
         }
@@ -96,7 +96,7 @@ test('a persisted failure cancels pending cleanup and retains both inventories w
     assert.equal((await post(server.manager, update('failed'))).status, 200);
     await advance(t, 600000);
     assert.equal(copies.size, 2);
-    assert.equal(copies.get('platform').master.status, 'failed');
+    assert.equal(copies.get('platform').primary.status, 'failed');
     assert.deepEqual(calls.map(call => call.method), ['object.update', 'object.update']);
 });
 

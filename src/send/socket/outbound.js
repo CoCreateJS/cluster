@@ -86,7 +86,7 @@ export class ServerMeshOutbound {
             array: 'servers',
             filter: {
                 query: {
-                    _id: { $lt: this.server.id }, 'master.status': 'running',
+                    _id: { $lt: this.server.id }, 'primary.status': 'running',
                     ...(!ownOrganization && { tenant_organization_id: organization_id })
                 },
                 sort: { _id: 1 },

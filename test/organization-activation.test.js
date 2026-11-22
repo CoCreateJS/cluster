@@ -17,7 +17,7 @@ function setup({ records = [], response, pendingRead } = {}) {
             assert.equal(request.organization_id, 'platform');
             assert.equal(request.host, 'platform.test');
             assert.deepEqual(request.filter.query, {
-                _id: { $lt: 'platform-node' }, 'master.status': 'running',
+                _id: { $lt: 'platform-node' }, 'primary.status': 'running',
                 ...(request.filter.query.tenant_organization_id && { tenant_organization_id: tenant })
             });
             return pendingRead || response || { object: records };

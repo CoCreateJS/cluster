@@ -25,7 +25,7 @@ function setup(t, count = 2) {
         id: 'node-1', ip: '192.0.2.1', deployment: { region: 'example', location: { country: 'US' }, cloud: 'cloud-api', dns: [] },
         manager: { organization_id: 'parent', host: 'parent.test', apiKey: 'test-only' },
         state: {
-            evaluateMasterFallback: () => calls.push('fallback'),
+            evaluatePrimaryFallback: () => calls.push('fallback'),
             save: async status => calls.push(status), getServerObject: object => object
         },
         crud: { send: async request => calls.push(request) },
@@ -61,7 +61,7 @@ test('startup configuration stays private and does not pretend planned workers a
     assert.equal('totalWorkers' in workers, false);
     assert.equal('totalWorkers' in server, false);
     assert.equal(Object.keys(workers.initialState()).filter(key => /^worker\d+$/.test(key)).length, 3);
-    await workers.setupMasterCluster();
+    await workers.setupPrimaryCluster();
     assert.equal(workers.size, 3);
     assert.equal(forks.length, 3);
 });
@@ -110,7 +110,7 @@ test('delete requests graceful shutdown once, keeps tracking until exit, and sup
     assert.equal(workers.get(record.id), record);
     assert.equal(workers.size, 1);
     assert.deepEqual(calls.filter(Array.isArray),
-        [['server.send', { method: 'shutdown', master: false, worker: record.id, server: 'node-1' }]]);
+        [['server.send', { method: 'shutdown', primary: false, worker: record.id, server: 'node-1' }]]);
     await exit(record.process);
     assert.equal(workers.size, 0);
     t.mock.timers.tick(2000);
@@ -171,7 +171,7 @@ test('delete cancels a pending replacement after an unexpected exit', async t =>
 
 test('draining removes workers without respawning and completes after the last exit', async t => {
     const { workers, server, forks, exit } = setup(t);
-    await workers.setupMasterCluster();
+    await workers.setupPrimaryCluster();
     server.state.isDraining = true;
     let completed = 0;
     server.state.shutdownCompletionCallback = () => completed++;
@@ -191,7 +191,7 @@ test('worker processes cannot create children and unrelated exits do not spawn r
     t.mock.timers.tick(2000);
     assert.equal(forks.length, 1);
     workers.isPrimary = false;
-    assert.equal(await workers.setupMasterCluster(), false);
+    assert.equal(await workers.setupPrimaryCluster(), false);
     assert.throws(() => workers.add(), /Only the primary/);
 });
 
@@ -279,7 +279,7 @@ for (const [configured, expected] of [[-1, 7], [-2, 6], ['-2', 6], [-20, 1]]) {
         t.mock.method(os, 'cpus', () => Array.from({ length: 8 }, () => ({})));
         const { workers, server, forks } = setup(t, configured);
         assert.equal(server.isWorker, expected === 1);
-        assert.equal(await workers.setupMasterCluster(), expected > 1);
+        assert.equal(await workers.setupPrimaryCluster(), expected > 1);
         assert.equal(forks.length, expected === 1 ? 0 : expected);
         assert.equal(workers.size, forks.length);
     });

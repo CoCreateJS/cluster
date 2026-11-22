@@ -126,7 +126,7 @@ export class CoCreateServer {
             } else {
                 this.id = process.env.SERVER_ID || ObjectId().toString();
                 await Config.prompt({ server_id: { value: this.id } });
-                console.log(`[@cocreate/cluster] [MASTER] Generated & persisted new Server ID: ${this.id}`);
+                console.log(`[@cocreate/cluster] [PRIMARY] Generated & persisted new Server ID: ${this.id}`);
             }
             process.env.SERVER_ID = this.id || "";
         } else {
@@ -145,7 +145,7 @@ export class CoCreateServer {
         if (!this.isPrimary) await this.cluster.init(this);
 
         if (this.isPrimary) {
-            console.log(`[@cocreate/cluster] [MASTER] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);
+            console.log(`[@cocreate/cluster] [PRIMARY] Orchestrator running with PID: ${process.pid} (Server ID: ${this.id})`);
             const response = await this.crud.send({
                 method: 'object.read', array: 'servers',
                 filter: { query: { _id: this.id }, limit: 1 },
@@ -166,7 +166,7 @@ export class CoCreateServer {
             });
             await this.cluster.init(this);
 
-            // Reset logs array for a fresh logging session on master startup
+            // Reset logs array for a fresh logging session on primary startup
             await this.crud.send(this.state.getServerObject({ logs: [] }));
 
             // Replace the persisted worker profile before the new workers start.
@@ -178,7 +178,7 @@ export class CoCreateServer {
 
             this.repository = await Repository.init(this);
 
-            if (await this.workers.setupMasterCluster()) {
+            if (await this.workers.setupPrimaryCluster()) {
                 return this;
             }
         }

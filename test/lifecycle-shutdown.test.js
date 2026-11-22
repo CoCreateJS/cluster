@@ -48,7 +48,7 @@ for (const status of ['failed', 'terminating']) {
         const methods = [];
         server.crud.send = async request => {
             methods.push(request.method);
-            return { object: [{ master: { status } }] };
+            return { object: [{ primary: { status } }] };
         };
         await server.state.save();
         await server.state.save('stopped');
@@ -59,7 +59,7 @@ for (const status of ['failed', 'terminating']) {
         const requests = [];
         server.crud.send = async request => {
             requests.push(request);
-            return { object: [{ _id: server.id, master: { status } }] };
+            return { object: [{ _id: server.id, primary: { status } }] };
         };
         await triggerGlobalShutdown('OS_SHUTDOWN', () => order.push('poweroff'));
         t.mock.timers.tick(1000);
@@ -82,7 +82,7 @@ test('a failed status read prevents an unchecked lifecycle write', async t => {
     assert.deepEqual(methods, ['object.read']);
 });
 
-test('master shutdown does not run worker service handlers', async t => {
+test('primary shutdown does not run worker service handlers', async t => {
     const { server, triggerGlobalShutdown } = await setup(t);
     server.isWorker = false;
     let called = false;
@@ -91,7 +91,7 @@ test('master shutdown does not run worker service handlers', async t => {
     assert.equal(called, false);
 });
 
-test('master checkpoints once after all workers exit and finalization is shared', async t => {
+test('primary checkpoints once after all workers exit and finalization is shared', async t => {
     const { server, triggerGlobalShutdown, order } = await setup(t);
     server.isWorker = false;
     server.workers.set(1, {});
@@ -123,7 +123,7 @@ test('single-process shutdown stops local consumers before the checkpoint', asyn
     assert.ok(order.indexOf('checkpoint') > order.indexOf('stop-ai'));
 });
 
-test('failed master checkpoint still completes shutdown', async t => {
+test('failed primary checkpoint still completes shutdown', async t => {
     const { server, triggerGlobalShutdown, order } = await setup(t);
     t.mock.method(console, 'error', () => {});
     server.repository = { stop: async () => { throw new Error('remote unavailable'); } };
@@ -138,14 +138,14 @@ test('the primary can recover its own Mesh failure without deleting missed-messa
     const writes = [];
     server.crud.send = async request => {
         if (request.method === 'object.read') return { object: [{
-            master: { status: 'failed', failure: { source: 'mesh' } }, queuedMessages: [{ uuid: 'missed' }]
+            primary: { status: 'failed', failure: { source: 'mesh' } }, queuedMessages: [{ uuid: 'missed' }]
         }] };
         writes.push(request);
         return { object: [request.object] };
     };
     await server.state.save('running');
     assert.equal(writes.length, 1);
-    assert.equal(writes[0].object.master.status, 'running');
+    assert.equal(writes[0].object.primary.status, 'running');
     assert.equal('queuedMessages' in writes[0].object, false);
     await server.state.save('stopped');
     assert.equal(writes.length, 1, 'shutdown cannot erase a failure');

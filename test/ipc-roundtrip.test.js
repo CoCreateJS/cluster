@@ -72,7 +72,7 @@ test('real workers reply consistently with async results, errors and ignored ret
     };
     server.send = IPC.init(server, pending);
     for (const broadcastSender of [undefined, false, true]) {
-        const response = await server.send({ method: 'example.work', master: false,
+        const response = await server.send({ method: 'example.work', primary: false,
             worker: children[0].id, value: 21, broadcastSender });
         assert.equal(response.result, 42);
         assert.equal(response.serverId, 'node');
@@ -82,13 +82,13 @@ test('real workers reply consistently with async results, errors and ignored ret
         assert.equal(typeof response.uuid, 'string');
         assert.equal(pending.size, 0);
     }
-    const failed = await server.send({ method: 'example.fail', master: false, worker: children[0].id });
+    const failed = await server.send({ method: 'example.fail', primary: false, worker: children[0].id });
     assert.equal(failed.success, false);
     assert.equal(failed.error, 'expected operation error');
     assert.equal(pending.size, 0);
 
     const prepared = {
-        method: 'example.preserve', master: false, worker: children[0].id,
+        method: 'example.preserve', primary: false, worker: children[0].id,
         value: { created: { $date: 1700000000123 }, label: '日本語 🌱', image: 'binary[0]' },
         binary: [{ $Uint8Array: new Uint8Array([0, 1, 127, 255]) }]
     };
@@ -104,19 +104,19 @@ test('real workers reply consistently with async results, errors and ignored ret
 
     // Caller discards the send Promise; the transport still clears correlation.
     const received = once(children[0], 'message');
-    server.send({ method: 'example.work', master: false, worker: children[0].id, value: 7 });
+    server.send({ method: 'example.work', primary: false, worker: children[0].id, value: 7 });
     assert.equal(fromFrame((await received)[0]).result, 14);
     assert.equal(pending.size, 0);
 
     // Unknown/duplicate response envelopes must never execute their method.
     children[0].send(toFrame({ method: 'example.sideEffect', uuid: 'late-response', response: true }));
-    const effect = await server.send({ method: 'example.sideEffect', master: false, worker: children[0].id });
+    const effect = await server.send({ method: 'example.sideEffect', primary: false, worker: children[0].id });
     assert.equal(effect.result, 1);
 
     const replies = new Set();
     const observe = (worker, bytes) => { if (fromFrame(bytes).uuid === 'broadcast-request') replies.add(worker.id); };
     cluster.on('message', observe);
-    const broadcast = await server.send({ method: 'example.work', uuid: 'broadcast-request', master: false,
+    const broadcast = await server.send({ method: 'example.work', uuid: 'broadcast-request', primary: false,
         broadcast: true, value: 3, broadcastSender: false });
     assert.equal(broadcast.uuid, 'broadcast-request');
     assert.equal(broadcast.result, 6);

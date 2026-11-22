@@ -50,7 +50,7 @@ test('real worker IPC awaits primary CRUD, preserves concurrent updates, and ret
         assert.deepEqual(ready.driverKeys, ['send']);
     }
     const scope = { database: 'ipc-test', array: 'items', organization_id: '000000000000000000000001', storage: 'production' };
-    const send = async (worker, data) => (await server.send({ method: 'fixture.crud', worker, master: false, broadcast: false, data })).result;
+    const send = async (worker, data) => (await server.send({ method: 'fixture.crud', worker, primary: false, broadcast: false, data })).result;
     const created = await send(1, { ...scope, method: 'object.create', object: { value: 0 } });
     assert.equal(created.success, true, created.error);
     const objectId = created.object[0]._id;
@@ -60,7 +60,7 @@ test('real worker IPC awaits primary CRUD, preserves concurrent updates, and ret
     const read = { ...scope, method: 'object.read', object: { _id: objectId } };
     assert.equal((await send(2, read)).object[0].value, 12);
     const registeredRead = await send(2, { ...read, clientId: 'client-two' });
-    const registrations = (await server.send({ method: 'fixture.distribution', worker: 2, master: false })).result;
+    const registrations = (await server.send({ method: 'fixture.distribution', worker: 2, primary: false })).result;
     assert.deepEqual(registrations.at(-1), { organization_id: scope.organization_id, clientId: 'client-two', distribution: registeredRead.distribution });
     assert.deepEqual([...server.workers.distribution.get(registeredRead.distribution[0])].sort(), [1, 2]);
 

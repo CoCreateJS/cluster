@@ -31,7 +31,7 @@ async function setup(t) {
     return { source, server, config };
 }
 
-test('master prepares its branch once and preserves local changes on restart', async t => {
+test('primary prepares its branch once and preserves local changes on restart', async t => {
     const options = await setup(t);
     const first = await initializeRepository(options);
     const second = await initializeRepository(options);

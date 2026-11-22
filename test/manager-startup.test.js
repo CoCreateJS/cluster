@@ -8,7 +8,7 @@ import { init as initManager } from '../src/manager.js';
 
 const serverId = 'aaaaaaaaaaaaaaaaaaaaaaaa';
 const create = { api: 'cloud', endpoint: 'create-instance', method: 'post', data: { server_id: serverId } };
-const update = id => ({ method: 'object.update', array: 'servers', object: { _id: id, master: { status: 'running' } } });
+const update = id => ({ method: 'object.update', array: 'servers', object: { _id: id, primary: { status: 'running' } } });
 
 async function post(manager, input) {
     const req = Readable.from([JSON.stringify(input)]);
@@ -28,7 +28,7 @@ async function setup(t, options = {}) {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const logs = [], reads = [], calls = [];
     t.mock.method(console, 'error', (...args) => logs.push(args));
-    const records = new Map([[serverId, { _id: serverId, master: { status: 'provisioning' } }]]);
+    const records = new Map([[serverId, { _id: serverId, primary: { status: 'provisioning' } }]]);
     const server = {
         organization_id: 'platform', host: 'platform.test',
         authorize: { ...Authorize, check: async () => true },

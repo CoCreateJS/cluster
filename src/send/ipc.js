@@ -17,18 +17,18 @@
  ********************************************************************************/
 
 import cluster from 'node:cluster';
-import { getDistribution } from '@cocreate/utils/distribution';
+import { addAwareness, getAwareness } from '@cocreate/utils/awareness';
 import { uuid } from '@cocreate/utils';
 import { encode, decode } from '@cocreate/coson';
 
 const presenceEvents = ['orgConnected', 'orgDisconnected'];
-const masterControls = ['restart', 'reboot', 'shutdown'];
+const primaryControls = ['restart', 'reboot', 'shutdown'];
 const workerControls = ['cordon', 'shed', 'drain'];
 const missingId = value => value == null || value === '';
 const includesTarget = (target, id) => target === undefined ||
     (Array.isArray(target) ? target : [target]).some(value => String(value) === String(id));
 const organizationDelivery = payload => Boolean(payload.organization_id &&
-    !presenceEvents.includes(payload.method) && !masterControls.includes(payload.method) &&
+    !presenceEvents.includes(payload.method) && !primaryControls.includes(payload.method) &&
     !workerControls.includes(payload.method));
 
 /** IPC owns request/reply correlation; callers always receive the envelope. */
@@ -85,7 +85,7 @@ export function init(server, pendingPromises) {
                 return Promise.resolve(server.socket.send({ ...payload })).then(() => payload);
             }
         } else if (execute && payload.method &&
-            (!server.isPrimary || payload.master !== false)) {
+            (!server.isPrimary || payload.primary !== false)) {
             return server.emitAsync(payload.method, payload);
         }
         return payload;
@@ -96,6 +96,12 @@ export function init(server, pendingPromises) {
             updateOrganizationWorker(payload);
             return payload;
         }
+        const isCrudMethod = /\.(create|read|update|delete)$/.test(payload.method);
+        const isCrudMutation = /\.(create|update|delete)$/.test(payload.method);
+        if (isCrudMethod && Array.isArray(payload.awareness) && payload.success !== false && !payload.error &&
+            payload.serverId === server.id && payload.workerId != null) {
+            addAwareness(server.workers.awareness, payload.organization_id, payload.awareness, payload.workerId);
+        }
         // Queue local work: synchronous eviction must not remove remote routes first.
         const local = Promise.resolve().then(() =>
             fromWorker && payload.serverId === server.id && payload.workerId === server.workerId
@@ -105,17 +111,19 @@ export function init(server, pendingPromises) {
         const targetsOtherNodes = payload.server === undefined ||
             (Array.isArray(payload.server) ? payload.server : [payload.server])
                 .some(id => String(id) !== String(server.id));
-        if (!Array.isArray(payload.distributionKeys) && payload.serverId === server.id && targetsOtherNodes &&
+        if (payload.serverId === server.id && targetsOtherNodes &&
             (payload.organization_id || payload.server !== undefined || payload.cluster !== undefined)) {
             server.cluster.send(payload);
         }
 
-        const distributionTargets = Array.isArray(payload.distributionKeys)
-            ? getDistribution(server.workers.distribution, payload.distributionKeys) : undefined;
-        const workers = targetsThisNode && !(payload.master === true && masterControls.includes(payload.method))
+        const awarenessTargets = isCrudMutation && Array.isArray(payload.awareness)
+            ? getAwareness(server.workers.awareness, payload.organization_id, payload.awareness) : undefined;
+        const localReadResponse = fromWorker && isCrudMethod && payload.method.endsWith('.read') &&
+            payload.serverId === server.id && payload.workerId != null;
+        const workers = targetsThisNode && !localReadResponse && !(payload.primary === true && primaryControls.includes(payload.method))
             ? [...server.workers.values()].filter(worker => {
                 if (!includesTarget(payload.worker, worker.id)) return false;
-                if (distributionTargets && (!/\.(create|update|delete)$/.test(payload.method) || !distributionTargets.has(worker.id))) return false;
+                if (awarenessTargets && !awarenessTargets.has(worker.id)) return false;
                 if (organizationDelivery(payload)) {
                     return organizationWorkers.get(payload.organization_id)?.has(worker.id) &&
                         !(payload.serverId === server.id && payload.workerId === worker.id);
@@ -127,7 +135,7 @@ export function init(server, pendingPromises) {
             const targeted = new Set(workers.map(worker => worker.id));
             const active = [...server.workers.values()].some(worker => !targeted.has(worker.id) &&
                 worker.isListening && !worker.isCordoned && !worker.isDraining);
-            if (!active) server.state.evaluateMasterFallback();
+            if (!active) server.state.evaluatePrimaryFallback();
         }
 
         const replies = await Promise.all([local, ...workers.map(worker => {

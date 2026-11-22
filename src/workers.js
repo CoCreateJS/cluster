@@ -19,6 +19,7 @@
 import { EventEmitter } from 'node:events';
 import cluster from 'node:cluster';
 import os from 'node:os';
+import { removeAwareness } from '@cocreate/utils/awareness';
 import State from './state.js';
 
 /**
@@ -46,7 +47,7 @@ export class Workers extends Map {
         this.server = server;
         this.isPrimary = cluster.isPrimary;
         this.pendingPromises = new Map();
-        this.distribution = new Map();
+        this.awareness = new Map();
         this.workerId = this.isPrimary ? null : (parseInt(process.env.WORKER_ID, 10) || 1);
     }
 
@@ -101,7 +102,7 @@ export class Workers extends Map {
     }
 
     async #handleWorkerExit(worker, code, signal) {
-        console.log(`[@cocreate/cluster] [MASTER] Worker ${worker.process.pid} exited (Code: ${code}, Signal: ${signal})`);
+        console.log(`[@cocreate/cluster] [PRIMARY] Worker ${worker.process.pid} exited (Code: ${code}, Signal: ${signal})`);
 
         let deadWorkerId = null;
         for (let [id, w] of this.entries()) {
@@ -114,8 +115,12 @@ export class Workers extends Map {
 
         if (deadWorkerId === null) return;
 
-        if (this.server.state?.evaluateMasterFallback) {
-            this.server.state.evaluateMasterFallback();
+        for (const organization_id of [...this.awareness.keys()]) {
+            removeAwareness(this.awareness, organization_id, deadWorkerId);
+        }
+
+        if (this.server.state?.evaluatePrimaryFallback) {
+            this.server.state.evaluatePrimaryFallback();
         }
 
         if (deadWorkerId && this.server.crud) {
@@ -138,10 +143,10 @@ export class Workers extends Map {
 
         if (state?.isShuttingDown || state?.isDraining || isCordoned) {
             this.#environments.delete(deadWorkerId);
-            console.log(`[@cocreate/cluster] [MASTER] Worker ${worker.process.pid} removed. Active workers remaining: ${this.size}`);
+            console.log(`[@cocreate/cluster] [PRIMARY] Worker ${worker.process.pid} removed. Active workers remaining: ${this.size}`);
 
             if (this.size === 0) {
-                console.log("[@cocreate/cluster] [MASTER] All workers successfully drained.");
+                console.log("[@cocreate/cluster] [PRIMARY] All workers successfully drained.");
                 if (state?.isShuttingDown) await state.finalizeShutdown?.();
                 if (typeof this.server.state.shutdownCompletionCallback === 'function') {
                     this.server.state.shutdownCompletionCallback();
@@ -162,7 +167,7 @@ export class Workers extends Map {
                 this.#environments.delete(targetId);
                 return;
             }
-            console.log(`[@cocreate/cluster] [MASTER] Respawning Worker ${targetId}...`);
+            console.log(`[@cocreate/cluster] [PRIMARY] Respawning Worker ${targetId}...`);
             this.#spawn(targetId, this.#environments.get(targetId));
         }, 2000));
     }
@@ -205,13 +210,13 @@ export class Workers extends Map {
         if (this.#deleting.has(workerId)) return;
         this.#deleting.add(workerId);
         record.isListening = false;
-        this.server.state?.evaluateMasterFallback?.();
+        this.server.state?.evaluatePrimaryFallback?.();
         const stop = () => record.process.kill('SIGTERM');
         if (typeof this.server.send !== 'function') {
             stop();
             return;
         }
-        this.server.send({ method: 'shutdown', master: false, worker: workerId, server: this.server.id })
+        this.server.send({ method: 'shutdown', primary: false, worker: workerId, server: this.server.id })
             .catch(stop);
     }
 
@@ -235,7 +240,7 @@ export class Workers extends Map {
             SERVER_DEPLOYMENT: JSON.stringify(this.server.deployment || {}),
         });
         worker.on('error', error => {
-            console.error(`[@cocreate/cluster] [MASTER] Error on Worker ${workerId}:`, error.message);
+            console.error(`[@cocreate/cluster] [PRIMARY] Error on Worker ${workerId}:`, error.message);
         });
         const record = {
             id: workerId,
@@ -262,16 +267,16 @@ export class Workers extends Map {
     }
 
     /**
-     * Initializes master cluster forks and listens for exit signals.
+     * Initializes primary cluster forks and listens for exit signals.
  * @private
  * @environment server
  */
-    async setupMasterCluster() {
+    async setupPrimaryCluster() {
         if (!this.server.state)
             this.server.state = await State.init(this.server);
         if (!this.isPrimary || this.isWorker) return false;
 
-        console.log(`[@cocreate/cluster] [MASTER] Orchestrator creating ${this.#config.workers} workers.`);
+        console.log(`[@cocreate/cluster] [PRIMARY] Orchestrator creating ${this.#config.workers} workers.`);
 
         for (let i = 0; i < this.#config.workers; i++) this.#spawn(i + 1);
         return true;

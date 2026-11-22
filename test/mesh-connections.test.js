@@ -27,7 +27,7 @@ function setup(t) {
 test('peer discovery queries older running servers before initiating sockets', async t => {
     const { mesh, outbound, sockets } = setup(t);
     mesh.server.crud = { send: async request => {
-        assert.deepEqual(request.filter.query, { _id: { $lt: 'server-z' }, 'master.status': 'running' });
+        assert.deepEqual(request.filter.query, { _id: { $lt: 'server-z' }, 'primary.status': 'running' });
         assert.equal(request.organization_id, 'platform');
         return { object: [{ _id: 'server-a', ip: '192.0.2.1' }, { _id: 'server-b', ip: '192.0.2.2' }] };
     } };

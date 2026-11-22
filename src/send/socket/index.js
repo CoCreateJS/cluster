@@ -15,6 +15,7 @@
 
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
+import { addAwareness, clearAwareness, getAwareness, removeAwareness } from '@cocreate/utils/awareness';
 import { encodeSegments, decode, decodeSegments } from '@cocreate/coson';
 import { sendSocketSegments, receiveSocketSegment, releaseSocketSegments } from '@cocreate/socket/transport';
 import { ServerMeshInbound } from './inbound.js';
@@ -41,6 +42,7 @@ export class ServerMesh extends EventEmitter {
         this.pendingPeerFailures = new Map(); // retained until the workflow confirms persistence
         this.messageQueues = new Map(); // transport scope/server ID -> encoded FIFO
         this.organizations = new Map();     // organization_id -> Network Socket[]
+        this.awareness = new Map(); // organization_id -> reference UUID -> peer server IDs
 
         this.isClosed = false;
         this.handleServerEvent = this.handleServerEvent.bind(this);
@@ -83,9 +85,12 @@ export class ServerMesh extends EventEmitter {
     }
 
     peerDisconnected(socket) {
-        if (!socket.isControlSocket || !socket.serverId || socket.distributionDisconnected) return;
+        if (!socket.isControlSocket || !socket.serverId || socket.peerDisconnectEmitted) return;
         if (this.controlSockets.some(peer => peer !== socket && peer.serverId === socket.serverId && peer.readyState === 1)) return;
-        socket.distributionDisconnected = true;
+        socket.peerDisconnectEmitted = true;
+        for (const organization_id of [...this.awareness.keys()]) {
+            removeAwareness(this.awareness, organization_id, socket.serverId);
+        }
         this.emit('peerDisconnected', { nodeId: socket.serverId });
     }
 
@@ -100,6 +105,7 @@ export class ServerMesh extends EventEmitter {
         if (!organization_id || !this.server?.isPrimary) return;
         this.outboundManager.closeOrganization(organization_id);
         this.inboundManager.closeOrganization(organization_id);
+        clearAwareness(this.awareness, organization_id);
         const sockets = this.organizations.get(organization_id);
         if (!sockets) return;
         this.organizations.delete(organization_id);
@@ -145,7 +151,7 @@ export class ServerMesh extends EventEmitter {
         await this.inboundManager.init(this.server);
         await this.outboundManager.init(this.server);
 
-        console.log(`[@cocreate/server-mesh] [MASTER] Initialized server mesh layer for node ${this.server.id || 'unassigned'}`);
+        console.log(`[@cocreate/server-mesh] [PRIMARY] Initialized server mesh layer for node ${this.server.id || 'unassigned'}`);
         return this;
     }
 
@@ -247,7 +253,7 @@ export class ServerMesh extends EventEmitter {
             this.server.send({
                 ...payload,
                 organization_id,
-                master: false,
+                primary: false,
                 status: 'received'
             });
         });
@@ -269,7 +275,7 @@ export class ServerMesh extends EventEmitter {
                     this.server.send({
                         method: 'mesh.inbound',
                         broadcast: true,
-                        master: false,
+                        primary: false,
                         data: message
                     });
                 } catch (err) {
@@ -319,6 +325,11 @@ export class ServerMesh extends EventEmitter {
         const method = message.method;
         if (!method) return;
 
+        if (message.organization_id && Array.isArray(message.awareness) &&
+            /\.(create|read|update|delete)$/.test(method) && ws.serverId) {
+            addAwareness(this.awareness, message.organization_id, message.awareness, ws.serverId);
+        }
+
         if (method === 'orgRegistered') {
             this.handleOrganizationRegistration(message, ws);
             return;
@@ -340,7 +351,7 @@ export class ServerMesh extends EventEmitter {
         } else if (message.organization_id) {
             this.server.send({
                 ...message,
-                master: false,
+                primary: false,
                 status: 'received'
             });
         } else {
@@ -402,13 +413,19 @@ export class ServerMesh extends EventEmitter {
             const availableSockets = payload.organization_id
                 ? this.organizations.get(payload.organization_id) || []
                 : this.controlSockets;
+            const awarenessTargets = payload.organization_id && Array.isArray(payload.awareness) &&
+                /\.(create|update|delete)$/.test(payload.method)
+                ? getAwareness(this.awareness, payload.organization_id, payload.awareness) : undefined;
             const targets = serverTargets === undefined
-                ? availableSockets
+                ? awarenessTargets
+                    ? availableSockets.filter(socket => awarenessTargets.has(socket.serverId))
+                    : availableSockets
                 : availableSockets.filter(socket => {
                     const servers = Array.isArray(serverTargets)
                         ? serverTargets
                         : [serverTargets];
-                    return servers.includes(socket.serverId);
+                    return servers.some(serverId => String(serverId) === String(socket.serverId)) &&
+                        (!awarenessTargets || awarenessTargets.has(socket.serverId));
                 });
 
             const uniqueSockets = Array.from(new Set(targets));
@@ -563,6 +580,9 @@ export class ServerMesh extends EventEmitter {
         for (const [orgId, sockets] of this.organizations.entries()) {
             const index = sockets.indexOf(ws);
             if (index !== -1) sockets.splice(index, 1);
+            if (index !== -1 && !sockets.some(peer => peer.serverId === ws.serverId && peer.readyState === 1)) {
+                removeAwareness(this.awareness, orgId, ws.serverId);
+            }
             if ((index !== -1 || orgId === ws.organization_id) && sockets.length === 0 &&
                 !this.server?.organizationWorkers?.has(orgId) &&
                 ![...this.outboundManager.retryTimers.keys()].some(key => key.startsWith(`${orgId}:`)) &&

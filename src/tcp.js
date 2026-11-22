@@ -11,7 +11,7 @@ async function loadPeers(server) {
             method: 'object.read',
             array: 'servers',
             filter: {
-                query: { 'master.status': 'running' },
+                query: { 'primary.status': 'running' },
                 sort: { _id: 1 },
                 limit: 0
             },

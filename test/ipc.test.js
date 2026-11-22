@@ -69,7 +69,7 @@ test('targeted shutdown reaches the remote mesh without shutting down the issuin
         emit: (...args) => events.push(args)
     };
     const send = initIPC(server, new Map());
-    await send({ method: 'shutdown', server: 'target-server', master: true, organization_id: 'tenant' });
+    await send({ method: 'shutdown', server: 'target-server', primary: true, organization_id: 'tenant' });
     assert.equal(forwarded.length, 1);
     assert.equal(forwarded[0].server, 'target-server');
     assert.deepEqual(events, []);
@@ -82,7 +82,7 @@ test('targeted shutdown executes on the target primary', async t => {
         workers: new Map(), emit: (...args) => events.push(args)
     };
     const send = initIPC(server, new Map());
-    await send({ method: 'shutdown', server: 'target-server', master: true, organization_id: 'tenant', serverId: 'issuing-server' });
+    await send({ method: 'shutdown', server: 'target-server', primary: true, organization_id: 'tenant', serverId: 'issuing-server' });
     assert.equal(events.length, 1);
     assert.equal(events[0][0], 'shutdown');
 });
@@ -134,7 +134,7 @@ test('server.send stores a Promise only at the UUID origin', async () => {
     const responsePromise = send({
         method: 'example.get',
         worker: 2,
-        master: false,
+        primary: false,
         broadcast: false,
         broadcastSender: true
     });
@@ -180,7 +180,7 @@ test('forwarded broadcasts await all workers and ignore broadcastSender', async 
         method: 'example.changed',
         broadcast: true,
         broadcastSender: false,
-        master: false
+        primary: false
     });
 
     assert.equal(pendingPromises.size, 2);
@@ -230,7 +230,7 @@ test('worker-to-worker IPC forwarding preserves prepared operators and binary at
     initIPC(server, new Map());
 
     const message = {
-        method: 'example.relay', server: 'server-1', worker: 2, master: false,
+        method: 'example.relay', server: 'server-1', worker: 2, primary: false,
         serverId: 'server-1', workerId: 1, uuid: 'worker-relay',
         value: { date: { $date: 1700000000000 }, text: '東京 🗼', binary: 'binary[0]' },
         binary: [{ $Uint8Array: new Uint8Array([3, 1, 4, 1, 5]) }]
@@ -329,7 +329,7 @@ test('worker-originated server targets are forwarded into the mesh', () => {
         uuid: 'worker-originated-uuid', serverId: 'server-1', workerId: 1,
         method: 'configuration.refresh',
         server: 'server-2',
-        master: false,
+        primary: false,
         broadcastSender: false
     });
 
@@ -624,7 +624,7 @@ test('worker exit rejects its unfinished request and clears correlation', async 
     const pending = new Map();
     const server = { id: 'node', isPrimary: true, workers: new Map([[2, worker]]), emit() {} };
     const send = initIPC(server, pending);
-    const failed = assert.rejects(send({ method: 'example.work', worker: 2, master: false }), /exited before replying/);
+    const failed = assert.rejects(send({ method: 'example.work', worker: 2, primary: false }), /exited before replying/);
     assert.equal(pending.size, 1);
     cluster.emit('exit', worker);
     await failed;
@@ -653,10 +653,10 @@ test('request correlation uses native worker IDs while presence uses the logical
         workers: new Map([[2, { id: 2, process }]]),
         organizationWorkers: new Map([['org', new Set([2])]]), emit() {} };
     const send = initIPC(server, pending);
-    assert.equal((await send({ method: 'example.work', worker: 2, master: false })).result, 'ok');
+    assert.equal((await send({ method: 'example.work', worker: 2, primary: false })).result, 'ok');
     assert.equal(pending.size, 0);
     process.send = () => {};
-    const failed = assert.rejects(send({ method: 'example.work', worker: 2, master: false }), /exited before replying/);
+    const failed = assert.rejects(send({ method: 'example.work', worker: 2, primary: false }), /exited before replying/);
     cluster.emit('exit', process);
     await failed;
     assert.equal(pending.size, 0);

@@ -419,7 +419,7 @@ writes are performed by Mesh. The default workflow seed lives in CoCreate App at
 `workflows` array through the normal configuration deployment.
 
 The workflow appends messages and observer evidence using `$addToSet`, then marks
-an eligible unreachable peer's `master.status` as `failed`, with a Mesh failure
+an eligible unreachable peer's `primary.status` as `failed`, with a Mesh failure
 reason. It does not overwrite terminating, draining, or stopped statuses and does
 not terminate or delete nodes. Another open connection prevents marking the whole
 node failed. A primary's subsequent healthy state save can recover its own Mesh
