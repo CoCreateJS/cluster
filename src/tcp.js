@@ -1,9 +1,171 @@
 import Net from 'node:net';
+import Config from '@cocreate/config';
 
 const HTTP_PORT = Number(process.env.HTTP_PORT || 80);
 const HTTPS_PORT = Number(process.env.HTTPS_PORT || 443);
 const BIND_IP = process.env.BIND_IP || '0.0.0.0';
 const CONNECT_TIMEOUT = 5000;
+const CLIENT_HELLO_TIMEOUT = 5000;
+const CLIENT_HELLO_MAX_BYTES = 64 * 1024;
+
+/** Read an unsigned 16-bit integer if the requested range is available. */
+function readUInt16(buffer, offset) {
+    return offset + 2 <= buffer.length ? buffer.readUInt16BE(offset) : null;
+}
+
+/** Parse the SNI name from a complete TLS ClientHello handshake message. */
+function parseClientHello(handshake) {
+    if (handshake.length < 4 || handshake[0] !== 1) return { complete: true, serverName: null };
+    const bodyLength = handshake.readUIntBE(1, 3);
+    if (handshake.length < 4 + bodyLength) return { complete: false, serverName: null };
+
+    const body = handshake.subarray(4, 4 + bodyLength);
+    let offset = 34; // legacy_version and random
+    if (offset >= body.length) return { complete: true, serverName: null };
+
+    const sessionIdLength = body[offset++];
+    offset += sessionIdLength;
+    const cipherLength = readUInt16(body, offset);
+    if (cipherLength === null) return { complete: true, serverName: null };
+    offset += 2 + cipherLength;
+
+    if (offset >= body.length) return { complete: true, serverName: null };
+    const compressionLength = body[offset++];
+    offset += compressionLength;
+    const extensionsLength = readUInt16(body, offset);
+    if (extensionsLength === null) return { complete: true, serverName: null };
+    offset += 2;
+    const extensionsEnd = Math.min(offset + extensionsLength, body.length);
+
+    while (offset + 4 <= extensionsEnd) {
+        const type = readUInt16(body, offset);
+        const length = readUInt16(body, offset + 2);
+        if (type === null || length === null || offset + 4 + length > extensionsEnd) break;
+        offset += 4;
+        const extensionEnd = offset + length;
+
+        if (type === 0 && offset + 2 <= extensionEnd) {
+            const namesLength = readUInt16(body, offset);
+            let nameOffset = offset + 2;
+            const namesEnd = namesLength === null ? offset : Math.min(nameOffset + namesLength, extensionEnd);
+            while (nameOffset + 3 <= namesEnd) {
+                const nameType = body[nameOffset++];
+                const nameLength = readUInt16(body, nameOffset);
+                if (nameLength === null) break;
+                nameOffset += 2;
+                if (nameOffset + nameLength > namesEnd) break;
+                if (nameType === 0 && nameLength > 0) {
+                    const serverName = body.toString('utf8', nameOffset, nameOffset + nameLength)
+                        .trim().toLowerCase().replace(/\.$/, '');
+                    return { complete: true, serverName: serverName || null };
+                }
+                nameOffset += nameLength;
+            }
+        }
+
+        offset = extensionEnd;
+    }
+
+    return { complete: true, serverName: null };
+}
+
+/** Extract SNI from a TLS record stream without terminating or changing TLS. */
+export function parseClientHelloServerName(input) {
+    const buffer = Buffer.isBuffer(input) ? input : Buffer.from(input);
+    const handshakeChunks = [];
+    let handshakeLength = 0;
+    let offset = 0;
+
+    while (offset < buffer.length) {
+        if (buffer.length - offset < 5) return { complete: false, serverName: null };
+        if (buffer[offset] !== 22) return { complete: true, serverName: null };
+        const recordLength = readUInt16(buffer, offset + 3);
+        if (recordLength === null || recordLength > 18432) return { complete: true, serverName: null };
+        if (buffer.length - offset < 5 + recordLength) return { complete: false, serverName: null };
+
+        const record = buffer.subarray(offset + 5, offset + 5 + recordLength);
+        handshakeChunks.push(record);
+        handshakeLength += record.length;
+        if (handshakeLength > CLIENT_HELLO_MAX_BYTES) return { complete: true, serverName: null };
+        const handshake = Buffer.concat(handshakeChunks, handshakeLength);
+        if (handshake.length >= 4) {
+            const parsed = parseClientHello(handshake);
+            if (parsed.complete) return parsed;
+        }
+        offset += 5 + recordLength;
+    }
+
+    return { complete: false, serverName: null };
+}
+
+/** Peek at the ClientHello and put every consumed byte back for the HTTPS server. */
+export function readClientHelloServerName(socket, { timeoutMs = CLIENT_HELLO_TIMEOUT, maxBytes = CLIENT_HELLO_MAX_BYTES } = {}) {
+    socket.pause();
+    return new Promise(resolve => {
+        const chunks = [];
+        let size = 0;
+        let settled = false;
+        const timer = setTimeout(() => finish(null), timeoutMs);
+        timer.unref?.();
+
+        const cleanup = () => {
+            clearTimeout(timer);
+            socket.off('data', onData);
+            socket.off('error', onEnd);
+            socket.off('close', onEnd);
+        };
+        const finish = serverName => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            socket.pause();
+            const initialBytes = Buffer.concat(chunks, size);
+            if (initialBytes.length && !socket.destroyed) socket.unshift(initialBytes);
+            resolve(serverName);
+        };
+        const onEnd = () => finish(null);
+        const onData = chunk => {
+            const bytes = Buffer.from(chunk);
+            chunks.push(bytes);
+            size += bytes.length;
+            if (size > maxBytes) return finish(null);
+            const parsed = parseClientHelloServerName(Buffer.concat(chunks, size));
+            if (parsed.complete) finish(parsed.serverName);
+        };
+
+        socket.on('data', onData);
+        socket.once('error', onEnd);
+        socket.once('close', onEnd);
+        socket.resume();
+    });
+}
+
+/** Resolve an SNI hostname through the existing organization CRUD helper. */
+export async function resolveOrganizationForHost(server, host) {
+    if (!host || typeof server?.crud?.getOrganization !== 'function') return null;
+    try {
+        let organization = await server.crud.getOrganization({ host });
+        if (organization?.object) {
+            organization = Array.isArray(organization.object) ? organization.object[0] : organization.object;
+        } else if (Array.isArray(organization)) {
+            organization = organization[0];
+        }
+        return organization?._id ? { host, organization_id: String(organization._id) } : null;
+    } catch (error) {
+        console.error('[@cocreate/cluster] Failed to resolve organization for TCP affinity:', error.message);
+        return null;
+    }
+}
+
+/** Resolve organization context only for locally accepted affinity connections. */
+export async function inspectOrganizationAffinity(server, socket) {
+    if (server.state?.isProxying || server.tcp?.affinity !== 'organization') return null;
+    const host = await readClientHelloServerName(socket);
+    if (!host) return null;
+    const organization = await resolveOrganizationForHost(server, host);
+    if (organization) server.tcp.organizationBySocket.set(socket, organization);
+    return organization;
+}
 
 async function loadPeers(server) {
     try {
@@ -101,6 +263,12 @@ function createListener(server, application, port) {
             forwardConnection(server, socket, port);
             return;
         }
+        if (port === HTTPS_PORT && server.tcp.affinity === 'organization') {
+            void inspectOrganizationAffinity(server, socket)
+                .catch(error => console.error('[@cocreate/cluster] TCP affinity inspection failed:', error.message))
+                .finally(() => application.emit('connection', socket));
+            return;
+        }
         application.emit('connection', socket);
     });
 }
@@ -112,6 +280,8 @@ async function init(server) {
 
     server.tcp = {
         peers: [], // Active server records are loaded before the TCP listeners start.
+        affinity: Config.get('tcp.affinity') === 'organization' ? 'organization' : null,
+        organizationBySocket: new WeakMap(),
         http: null,
         https: null,
         listen,
